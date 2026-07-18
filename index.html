@@ -253,6 +253,7 @@
       <select id="fCat" onchange="renderTx()"></select>
       <select id="fAcc" onchange="renderTx()"></select>
       <input id="fSearch" placeholder="Buscar..." oninput="renderTx()">
+      <button class="btn sm ghost" onclick="openImportDialog('tx')">📥 Importar extrato</button>
     </div>
     <div class="panel" id="txList"></div>
   </section>
@@ -287,6 +288,7 @@
     </div>
     <div class="panel">
       <h2>Carteira <span style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn sm ghost" onclick="openImportDialog('inv')">📥 Importar corretora</button>
         <button class="btn sm ghost" onclick="exportIRStatement()" title="Demonstrativo para a declaração de IR">📄 Demonstrativo IR</button>
         <button class="btn sm ghost" id="btnUpd" onclick="updateQuotes()">↻ Atualizar cotações</button>
         <button class="btn sm" onclick="openInvDialog()">+ Ativo</button></span></h2>
@@ -643,6 +645,66 @@
 </dialog>
 
 <!-- DIALOG: backup -->
+<dialog id="dlgImport" style="max-width:min(900px,92vw)">
+  <form method="dialog" style="padding:20px;display:flex;flex-direction:column;gap:12px">
+    <h3>Importar extrato</h3>
+    <p class="muted" style="font-size:.78rem">Nada entra nos seus dados sem você revisar e confirmar linha por linha aqui embaixo. PDF é o formato menos confiável (leitura heurística) — prefira OFX ou CSV se seu banco/corretora oferecer.</p>
+    <div class="g2">
+      <div><label>Tipo de extrato</label>
+        <select id="impKind" onchange="resetImportUI()">
+          <option value="tx">Extrato bancário (receitas/despesas)</option>
+          <option value="inv">Extrato de corretora (compra/venda de ativos)</option>
+        </select></div>
+      <div><label>Arquivo (.ofx, .csv ou .pdf)</label>
+        <input type="file" id="impFile" accept=".ofx,.csv,.pdf" onchange="handleImportFile(this)"></div>
+    </div>
+    <p class="muted" id="impFileStatus" style="font-size:.8rem"></p>
+
+    <div id="impCsvMap" style="display:none">
+      <b style="font-size:.9rem">Confirme quais colunas usar</b>
+      <div id="impCsvPreview" style="overflow-x:auto;margin:8px 0"></div>
+      <div id="impCsvFieldsTx" class="g2" style="display:none">
+        <div><label>Data</label><select id="mapDate"></select></div>
+        <div><label>Descrição</label><select id="mapDesc"></select></div>
+        <div><label>Valor (1 coluna com sinal)</label><select id="mapAmount"></select></div>
+        <div></div>
+        <div><label>ou Crédito (se não tiver coluna de valor)</label><select id="mapCredit"></select></div>
+        <div><label>Débito</label><select id="mapDebit"></select></div>
+      </div>
+      <div id="impCsvFieldsInv" class="g2" style="display:none">
+        <div><label>Data</label><select id="mapDateI"></select></div>
+        <div><label>Ativo (ticker)</label><select id="mapTicker"></select></div>
+        <div><label>Operação (compra/venda) — opcional</label><select id="mapOp"></select></div>
+        <div><label>Quantidade</label><select id="mapQty"></select></div>
+        <div><label>Preço</label><select id="mapPrice"></select></div>
+      </div>
+      <label class="chk" style="margin-top:8px"><input type="checkbox" id="mapHasHeader" checked> A primeira linha é cabeçalho (não é um lançamento)</label>
+      <div class="actions"><button type="button" class="btn sm" onclick="applyCsvMapping()">Processar CSV</button></div>
+    </div>
+
+    <div id="impAccWrap" style="display:none">
+      <label>Lançar na conta</label>
+      <select id="impAcc"></select>
+    </div>
+
+    <div id="impReview" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <b id="impCount"></b>
+        <div style="display:flex;gap:8px">
+          <button type="button" class="btn sm ghost" onclick="impToggleAll(true)">Marcar todas</button>
+          <button type="button" class="btn sm ghost" onclick="impToggleAll(false)">Desmarcar todas</button>
+        </div>
+      </div>
+      <div style="max-height:360px;overflow:auto;margin-top:8px;border:1px solid var(--line);border-radius:8px" id="impTableWrap"></div>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="btn ghost" onclick="dlgImport.close()">Fechar</button>
+      <button type="button" class="btn" id="impCommitBtn" style="display:none" onclick="commitImport()">Importar selecionados</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="dlgBackup">
   <form method="dialog" style="padding:20px;display:flex;flex-direction:column;gap:12px">
     <h3>Backup dos dados</h3>
@@ -713,6 +775,7 @@ function migrate(d){
   }
   if(!d.settings.fire) d.settings.fire = {income:null, aporte:null, ret:4, swr:4};
   if(!d.sinking) d.sinking = [];
+  if(!d.importedTrades) d.importedTrades = []; // registro leve pra detectar reimportação de nota de corretagem
   if(!d.sinkingPaid) d.sinkingPaid = {};
   if(d.settings.debtExtra===undefined) d.settings.debtExtra = 0;
   if(d.settings.ipcaExp===undefined) d.settings.ipcaExp = 4.5;
@@ -2325,6 +2388,437 @@ function renderCloudUI(){
 async function initCloud(){
   renderCloudUI();
   if(cloudCfg.token && cloudCfg.gistId) await cloudSyncNow(true);
+}
+
+// ===== importação de extrato (OFX / CSV / PDF) =====
+// linhas normalizadas: {kind:'tx', date, desc, amount, type} para banco
+//                    ou {kind:'inv', date, ticker, op:'compra'|'venda', qty, price} para corretora
+function ofxTag(block, tag){
+  const m = block.match(new RegExp('<'+tag+'>\\s*([^<\r\n]*)', 'i'));
+  return m ? m[1].trim() : null;
+}
+function ofxBlocks(text, tag){
+  const re = new RegExp('<'+tag+'>([\\s\\S]*?)<\\/'+tag+'>', 'gi');
+  const out = []; let m;
+  while((m = re.exec(text))) out.push(m[1]);
+  return out;
+}
+function ofxDateToISO(d){
+  if(!d) return null;
+  const digits = d.replace(/[^\d]/g,'').slice(0,8);
+  if(digits.length<8) return null;
+  return digits.slice(0,4)+'-'+digits.slice(4,6)+'-'+digits.slice(6,8);
+}
+function parseOFX(text){
+  const rows = [];
+  for(const block of ofxBlocks(text, 'STMTTRN')){
+    const amt = parseFloat(ofxTag(block,'TRNAMT'));
+    const date = ofxDateToISO(ofxTag(block,'DTPOSTED'));
+    const memo = ofxTag(block,'MEMO') || ofxTag(block,'NAME') || '';
+    if(!date || isNaN(amt) || amt===0) continue;
+    rows.push({kind:'tx', date, desc: memo, amount: Math.abs(amt), type: amt<0?'despesa':'receita'});
+  }
+  // mapa UNIQUEID → ticker (declarado no SECLIST) pra identificar o ativo nas compras/vendas
+  const secMap = {};
+  for(const sec of ofxBlocks(text, 'SECINFO')){
+    const uid = ofxTag(sec,'UNIQUEID');
+    const ticker = ofxTag(sec,'TICKER');
+    if(uid && ticker) secMap[uid] = ticker.toUpperCase();
+  }
+  for(const [tag, op] of [['INVBUY','compra'],['INVSELL','venda']]){
+    for(const block of ofxBlocks(text, tag)){
+      const uid = ofxTag(block,'UNIQUEID');
+      const units = parseFloat(ofxTag(block,'UNITS'));
+      const price = parseFloat(ofxTag(block,'UNITPRICE'));
+      const date = ofxDateToISO(ofxTag(block,'DTTRADE') || ofxTag(block,'DTPOSTED'));
+      if(!date || isNaN(units) || isNaN(price)) continue;
+      rows.push({kind:'inv', date, ticker: secMap[uid]||null, op, qty: Math.abs(units), price});
+    }
+  }
+  return rows;
+}
+
+// --- CSV: delimitador automático, números e datas no padrão brasileiro ---
+function csvSplit(text){
+  const firstLine = (text.split(/\r?\n/).find(l=>l.trim()) || '');
+  const counts = {';': (firstLine.match(/;/g)||[]).length, ',': (firstLine.match(/,/g)||[]).length, '\t': (firstLine.match(/\t/g)||[]).length};
+  const delim = Object.entries(counts).sort((a,b)=>b[1]-a[1])[0][0] || ',';
+  const lines = text.split(/\r?\n/).filter(l=>l.trim());
+  return {delim, rows: lines.map(l=>csvParseLine(l, delim))};
+}
+function csvParseLine(line, delim){
+  const out=[]; let cur=''; let inQ=false;
+  for(let i=0;i<line.length;i++){
+    const c = line[i];
+    if(inQ){
+      if(c==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else inQ=false; }
+      else cur+=c;
+    } else {
+      if(c==='"') inQ=true;
+      else if(c===delim){ out.push(cur); cur=''; }
+      else cur+=c;
+    }
+  }
+  out.push(cur);
+  return out.map(s=>s.replace(/^﻿/,'').trim());
+}
+// aceita "1.234,56" (padrão BR), "1234.56" (padrão US) e "R$ -45,90"
+function parseBRNumber(s){
+  if(s==null) return NaN;
+  s = String(s).trim().replace(/^R\$\s*/i,'').replace(/\s/g,'');
+  if(!s) return NaN;
+  if(/,\d{1,2}$/.test(s)) s = s.replace(/\./g,'').replace(',', '.');
+  else s = s.replace(/,/g,'');
+  return parseFloat(s);
+}
+// aceita DD/MM/AAAA, DD/MM/AA e AAAA-MM-DD
+function parseFlexDate(s){
+  if(!s) return null;
+  s = s.trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return m[1]+'-'+m[2]+'-'+m[3];
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if(m){
+    let [,d,mo,y] = m;
+    if(y.length===2) y = '20'+y;
+    return y+'-'+mo.padStart(2,'0')+'-'+d.padStart(2,'0');
+  }
+  return null;
+}
+// mapping banco: {dateCol, descCol, amountCol, hasHeader} ou {dateCol, descCol, creditCol, debitCol, hasHeader}
+function parseCSVTx(text, mapping){
+  const {rows} = csvSplit(text);
+  const dataRows = mapping.hasHeader ? rows.slice(1) : rows;
+  const out = [];
+  for(const r of dataRows){
+    if(!r.length || r.every(c=>!c)) continue;
+    const date = parseFlexDate(r[mapping.dateCol]);
+    const desc = mapping.descCol!=null ? (r[mapping.descCol]||'') : '';
+    let amount;
+    if(mapping.amountCol!=null) amount = parseBRNumber(r[mapping.amountCol]);
+    else amount = (parseBRNumber(r[mapping.creditCol])||0) - Math.abs(parseBRNumber(r[mapping.debitCol])||0);
+    if(!date || isNaN(amount) || amount===0) continue;
+    out.push({kind:'tx', date, desc, amount: Math.abs(amount), type: amount<0?'despesa':'receita'});
+  }
+  return out;
+}
+// mapping corretora: {dateCol, tickerCol, opCol, qtyCol, priceCol, hasHeader}
+function parseCSVInv(text, mapping){
+  const {rows} = csvSplit(text);
+  const dataRows = mapping.hasHeader ? rows.slice(1) : rows;
+  const out = [];
+  for(const r of dataRows){
+    if(!r.length || r.every(c=>!c)) continue;
+    const date = parseFlexDate(r[mapping.dateCol]);
+    const ticker = (r[mapping.tickerCol]||'').trim().toUpperCase();
+    const qty = Math.abs(parseBRNumber(r[mapping.qtyCol]));
+    const price = parseBRNumber(r[mapping.priceCol]);
+    let op = 'compra';
+    if(mapping.opCol!=null) op = /venda|sell/i.test(r[mapping.opCol]||'') ? 'venda' : 'compra';
+    if(!date || !ticker || isNaN(qty) || qty<=0 || isNaN(price)) continue;
+    out.push({kind:'inv', date, ticker, op, qty, price});
+  }
+  return out;
+}
+
+// --- PDF: extração de texto (pdf.js via CDN, carregado só quando um PDF é escolhido) +
+// heurística de reconhecimento de linha, separada em função pura pra dar pra testar sem PDF real.
+// Layout de extrato varia muito entre instituições — por isso isso é best-effort e SEMPRE
+// passa pela tela de revisão antes de qualquer coisa entrar nos dados de verdade.
+function parsePDFTextTx(text){
+  const out = [];
+  const re = /^\s*(\d{1,2}\/\d{1,2}\/\d{2,4})\s+(.+?)\s+(-?R?\$?\s?-?[\d.,]+)\s*$/;
+  for(const line of text.split(/\n/)){
+    const m = line.match(re);
+    if(!m) continue;
+    const date = parseFlexDate(m[1]);
+    const amount = parseBRNumber(m[3]);
+    const desc = m[2].trim();
+    if(!date || isNaN(amount) || amount===0 || !desc) continue;
+    out.push({kind:'tx', date, desc, amount: Math.abs(amount), type: amount<0?'despesa':'receita'});
+  }
+  return out;
+}
+function parsePDFTextInv(text){
+  const out = [];
+  const re = /(\d{1,2}\/\d{1,2}\/\d{2,4})?.*?\b([A-Z]{4}\d{1,2})\b.*?\b(C|V|COMPRA|VENDA)\b.*?([\d.,]+)\s+([\d.,]+)/i;
+  for(const line of text.split(/\n/)){
+    const m = line.match(re);
+    if(!m) continue;
+    const date = m[1] ? parseFlexDate(m[1]) : null;
+    const ticker = m[2].toUpperCase();
+    const op = /^v|venda/i.test(m[3]) ? 'venda' : 'compra';
+    const qty = Math.abs(parseBRNumber(m[4]));
+    const price = parseBRNumber(m[5]);
+    if(!ticker || isNaN(qty) || qty<=0 || isNaN(price)) continue;
+    out.push({kind:'inv', date: date||todayISO(), ticker, op, qty, price});
+  }
+  return out;
+}
+let pdfjsLoading = null;
+function ensurePdfJs(){
+  if(window.pdfjsLib) return Promise.resolve();
+  if(pdfjsLoading) return pdfjsLoading;
+  pdfjsLoading = new Promise((resolve, reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      resolve();
+    };
+    s.onerror = () => reject(new Error('Não foi possível carregar o leitor de PDF (sem conexão?).'));
+    document.head.appendChild(s);
+  });
+  return pdfjsLoading;
+}
+async function extractPDFText(file){
+  await ensurePdfJs();
+  const buf = await file.arrayBuffer();
+  const doc = await window.pdfjsLib.getDocument({data: buf}).promise;
+  let text = '';
+  for(let p=1; p<=doc.numPages; p++){
+    const page = await doc.getPage(p);
+    const content = await page.getTextContent();
+    let lastY = null, line = '';
+    for(const item of content.items){
+      const y = item.transform[5];
+      if(lastY!==null && Math.abs(y-lastY)>2){ text += line + '\n'; line=''; }
+      line += item.str + ' ';
+      lastY = y;
+    }
+    text += line + '\n';
+  }
+  return text;
+}
+async function parsePDF(file, kind){
+  const text = await extractPDFText(file);
+  return kind==='inv' ? parsePDFTextInv(text) : parsePDFTextTx(text);
+}
+
+// --- categorização por palavra-chave: só um chute inicial, sempre editável na revisão ---
+const CATEGORY_KEYWORDS = [
+  [/UBER|99APP|99POP|\bTAXI\b|POSTO |COMBUSTIVEL|GASOLINA|ESTACIONAMENTO|PEDAGIO|\bMETRO\b|ONIBUS|BILHETE UNICO/i, 'Transporte'],
+  [/IFOOD|RAPPI|RESTAURANTE|LANCHONETE|PADARIA|PIZZARIA|\bBAR\b/i, 'Alimentação'],
+  [/MERCADO|SUPERMERCADO|ATACAD|HORTIFRUTI|CARREFOUR|\bEXTRA\b|PAO DE ACUCAR|ASSAI/i, 'Mercado'],
+  [/ALUGUEL|CONDOMINIO|IMOBILIARIA/i, 'Moradia'],
+  [/\bENEL\b|\bCPFL\b|\bLIGHT\b|SABESP|COPASA|\bVIVO\b|\bCLARO\b|\bTIM\b|\bOI\b|\bNET\b|INTERNET|ENERGIA|\bAGUA\b/i, 'Contas (luz/água/net)'],
+  [/FARMACIA|DROGARIA|HOSPITAL|CLINICA|UNIMED|\bAMIL\b|MEDICO|DENTISTA|PLANO DE SAUDE/i, 'Saúde'],
+  [/CINEMA|INGRESSO|\bSTEAM\b|\bSHOW\b|TEATRO|PARQUE/i, 'Lazer'],
+  [/FACULDADE|\bESCOLA\b|\bCURSO\b|UDEMY|\bALURA\b/i, 'Educação'],
+  [/NETFLIX|SPOTIFY|PRIME VIDEO|DISNEY|\bHBO\b|YOUTUBE PREMIUM|ICLOUD|GOOGLE ONE/i, 'Assinaturas'],
+];
+const CATEGORY_KEYWORDS_RECEITA = [
+  [/SALARIO|FOLHA (DE )?PAGAMENTO|FOLHA PGTO/i, 'Salário'],
+  [/RENDIMENTO|DIVIDENDO|\bJCP\b/i, 'Investimentos'],
+];
+function guessCategory(desc, type){
+  const list = type==='receita' ? CATEGORY_KEYWORDS_RECEITA : CATEGORY_KEYWORDS;
+  const d = (desc||'').toUpperCase();
+  for(const [re, cat] of list) if(re.test(d)) return cat;
+  return 'Outros';
+}
+
+// --- detecção de duplicata: heurística, não infalível — a tela de revisão sempre deixa o usuário decidir ---
+function normText(s){ return (s||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
+function textSimilar(a, b){
+  const na = normText(a), nb = normText(b);
+  if(!na || !nb) return false;
+  return na===nb || na.includes(nb) || nb.includes(na);
+}
+function isDuplicateTx(row){
+  return db.transactions.some(t =>
+    t.date===row.date && Math.abs(t.amount-row.amount)<0.01 && t.type===row.type && textSimilar(t.desc, row.desc));
+}
+// investimentos não têm um "livro-razão" de trades (só a posição agregada) — por isso mantemos um
+// pequeno registro (db.importedTrades) só das negociações que entraram por ESTE importador,
+// pra pelo menos pegar o caso comum de reimportar sem querer a mesma nota de corretagem
+function tradeHash(row){ return [row.date, row.ticker, row.op, row.qty, row.price].join('|'); }
+function isDuplicateInv(row){ return (db.importedTrades||[]).includes(tradeHash(row)); }
+
+// --- aplica trade importado na posição agregada de db.investments ---
+// compra: pondera o preço médio com o que já existe (ou cria a posição, se for ticker novo)
+function applyBuy(row){
+  let inv = db.investments.find(i=>i.kind==='b3' && i.ticker===row.ticker);
+  if(inv){
+    const novoQty = inv.qty + row.qty;
+    inv.avgPrice = (inv.qty*inv.avgPrice + row.qty*row.price) / novoQty;
+    inv.qty = novoQty;
+  } else {
+    inv = {id:uid(), kind:'b3', ticker:row.ticker, qty:row.qty, avgPrice:row.price, lastPrice:row.price};
+    db.investments.push(inv);
+  }
+  return inv;
+}
+// venda: reduz a quantidade sem mudar o preço médio das cotas restantes (padrão contábil) — não
+// calcula lucro/prejuízo realizado, isso fica pro Informe de Rendimentos oficial da corretora.
+// zerou (ou vendeu mais do que tinha registrado) → remove a posição, sem deixar qty negativa.
+function applySell(row){
+  const inv = db.investments.find(i=>i.kind==='b3' && i.ticker===row.ticker);
+  if(!inv) return null; // vendeu algo que o app não tinha — fica pra ajuste manual na revisão
+  inv.qty -= row.qty;
+  if(inv.qty <= 0.0000001){ db.investments = db.investments.filter(i=>i!==inv); return null; }
+  return inv;
+}
+function applyTrade(row){ return row.op==='venda' ? applySell(row) : applyBuy(row); }
+
+// ===== UI de importação de extrato =====
+let impRows = [], impCsvRawText = '';
+function resetImportUI(){
+  impFile.value=''; impFileStatus.textContent='';
+  impCsvMap.style.display='none'; impReview.style.display='none'; impCommitBtn.style.display='none';
+  impAccWrap.style.display='none'; impRows=[];
+}
+function openImportDialog(kind){
+  impKind.value = kind;
+  resetImportUI();
+  dlgImport.showModal();
+}
+async function handleImportFile(input){
+  const file = input.files[0]; if(!file) return;
+  const ext = (file.name.split('.').pop()||'').toLowerCase();
+  const kind = impKind.value;
+  impCsvMap.style.display='none'; impReview.style.display='none'; impCommitBtn.style.display='none';
+  impFileStatus.textContent = 'Lendo arquivo...';
+  try{
+    if(ext==='ofx'){
+      const rows = parseOFX(await file.text()).filter(r=>r.kind===kind);
+      startReview(rows);
+    } else if(ext==='csv'){
+      impCsvRawText = await file.text();
+      showCsvMapping(csvSplit(impCsvRawText), kind);
+    } else if(ext==='pdf'){
+      impFileStatus.textContent = 'Lendo PDF (pode levar alguns segundos)...';
+      const rows = await parsePDF(file, kind);
+      startReview(rows);
+    } else {
+      impFileStatus.textContent = '⚠ Formato não reconhecido — use .ofx, .csv ou .pdf.';
+    }
+  }catch(e){ impFileStatus.textContent = '⚠ '+(e.message||'Erro ao ler o arquivo.'); }
+}
+function buildCsvPreviewTable(rows){
+  return '<table style="border-collapse:collapse;font-size:.75rem"><tbody>'+rows.map(r=>
+    '<tr>'+r.map(c=>`<td style="border:1px solid var(--line);padding:3px 6px;white-space:nowrap">${esc(c)}</td>`).join('')+'</tr>'
+  ).join('')+'</tbody></table>';
+}
+function showCsvMapping(parsed, kind){
+  impFileStatus.textContent = '';
+  impCsvMap.style.display = '';
+  impCsvPreview.innerHTML = buildCsvPreviewTable(parsed.rows.slice(0,4));
+  const first = parsed.rows[0]||[];
+  const opts = first.map((c,i)=>`<option value="${i}">Coluna ${i+1}: "${esc(String(c).slice(0,20))}"</option>`).join('');
+  const noneOpt = '<option value="">(nenhuma)</option>';
+  if(kind==='tx'){
+    impCsvFieldsTx.style.display=''; impCsvFieldsInv.style.display='none';
+    mapDate.innerHTML=opts; mapDesc.innerHTML=noneOpt+opts; mapAmount.innerHTML=noneOpt+opts;
+    mapCredit.innerHTML=noneOpt+opts; mapDebit.innerHTML=noneOpt+opts;
+  } else {
+    impCsvFieldsInv.style.display=''; impCsvFieldsTx.style.display='none';
+    mapDateI.innerHTML=opts; mapTicker.innerHTML=opts; mapOp.innerHTML=noneOpt+opts;
+    mapQty.innerHTML=opts; mapPrice.innerHTML=opts;
+  }
+}
+function applyCsvMapping(){
+  const kind = impKind.value;
+  let rows;
+  if(kind==='tx'){
+    const mapping = {dateCol:+mapDate.value, descCol: mapDesc.value===''?null:+mapDesc.value, hasHeader: mapHasHeader.checked};
+    if(mapAmount.value!=='') mapping.amountCol = +mapAmount.value;
+    else if(mapCredit.value!=='' && mapDebit.value!==''){ mapping.creditCol=+mapCredit.value; mapping.debitCol=+mapDebit.value; }
+    else { impFileStatus.textContent = '⚠ Informe a coluna de valor, ou as duas colunas de crédito/débito.'; return; }
+    rows = parseCSVTx(impCsvRawText, mapping);
+  } else {
+    const mapping = {dateCol:+mapDateI.value, tickerCol:+mapTicker.value, opCol: mapOp.value===''?null:+mapOp.value,
+      qtyCol:+mapQty.value, priceCol:+mapPrice.value, hasHeader: mapHasHeader.checked};
+    rows = parseCSVInv(impCsvRawText, mapping);
+  }
+  impCsvMap.style.display = 'none';
+  startReview(rows);
+}
+function startReview(rows){
+  impRows = rows.map(r=>{
+    const dup = r.kind==='tx' ? isDuplicateTx(r) : isDuplicateInv(r);
+    return {...r, include: !dup, dup, cat: r.kind==='tx' ? guessCategory(r.desc, r.type) : null};
+  });
+  if(!impRows.length){
+    impFileStatus.textContent = '⚠ Nenhum lançamento reconhecido nesse arquivo.';
+    impReview.style.display='none'; impCommitBtn.style.display='none';
+    return;
+  }
+  impFileStatus.textContent = '';
+  if(impRows[0].kind==='tx'){ impAccWrap.style.display=''; fillAccSelect(impAcc); }
+  else impAccWrap.style.display='none';
+  renderImportReview();
+  impReview.style.display=''; impCommitBtn.style.display='';
+}
+function renderImportReview(){
+  impCount.textContent = impRows.length+' lançamento(s) encontrado(s) — revise antes de importar';
+  if(impRows[0].kind==='tx'){
+    impTableWrap.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:.82rem">'+
+      '<thead><tr><th style="padding:6px"></th><th style="padding:6px;text-align:left">Data</th><th style="padding:6px;text-align:left">Descrição</th>'+
+      '<th style="padding:6px">Tipo</th><th style="padding:6px">Categoria</th><th style="padding:6px;text-align:right">Valor</th></tr></thead><tbody>'+
+      impRows.map((r,i)=>`<tr style="border-top:1px solid var(--line)">
+        <td style="padding:6px;text-align:center"><input type="checkbox" id="impChk${i}" ${r.include?'checked':''}></td>
+        <td style="padding:6px"><input type="date" id="impDate${i}" value="${r.date}" style="width:135px"></td>
+        <td style="padding:6px"><input type="text" id="impDesc${i}" value="${esc(r.desc)}" style="width:100%;min-width:160px">${r.dup?'<div class="pill late" style="margin-top:3px;display:inline-block">possível duplicata</div>':''}</td>
+        <td style="padding:6px"><select id="impType${i}" onchange="impRetypeCat(${i})"><option value="despesa" ${r.type==='despesa'?'selected':''}>Despesa</option><option value="receita" ${r.type==='receita'?'selected':''}>Receita</option></select></td>
+        <td style="padding:6px"><select id="impCat${i}"></select></td>
+        <td style="padding:6px;text-align:right;white-space:nowrap">${fmt(r.amount)}</td>
+      </tr>`).join('')+'</tbody></table>';
+    impRows.forEach((r,i)=>{ fillCatSelect(document.getElementById('impCat'+i), r.type==='receita'?CATS_R:CATS_D); document.getElementById('impCat'+i).value = r.cat; });
+  } else {
+    impTableWrap.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:.82rem">'+
+      '<thead><tr><th style="padding:6px"></th><th style="padding:6px;text-align:left">Data</th><th style="padding:6px;text-align:left">Ativo</th>'+
+      '<th style="padding:6px">Operação</th><th style="padding:6px">Quantidade</th><th style="padding:6px">Preço</th></tr></thead><tbody>'+
+      impRows.map((r,i)=>`<tr style="border-top:1px solid var(--line)">
+        <td style="padding:6px;text-align:center"><input type="checkbox" id="impChk${i}" ${r.include?'checked':''}></td>
+        <td style="padding:6px"><input type="date" id="impDate${i}" value="${r.date}" style="width:135px"></td>
+        <td style="padding:6px"><input type="text" id="impTicker${i}" value="${esc(r.ticker||'')}" style="width:110px;text-transform:uppercase">${!r.ticker?'<div class="pill late" style="margin-top:3px;display:inline-block">ticker não identificado</div>':''}${r.dup?'<div class="pill late" style="margin-top:3px;display:inline-block">possível duplicata</div>':''}</td>
+        <td style="padding:6px"><select id="impOp${i}"><option value="compra" ${r.op==='compra'?'selected':''}>Compra</option><option value="venda" ${r.op==='venda'?'selected':''}>Venda</option></select></td>
+        <td style="padding:6px"><input type="number" step="any" id="impQty${i}" value="${r.qty}" style="width:90px"></td>
+        <td style="padding:6px"><input type="number" step="any" id="impPrice${i}" value="${r.price}" style="width:100px"></td>
+      </tr>`).join('')+'</tbody></table>';
+  }
+}
+function impRetypeCat(i){
+  const type = document.getElementById('impType'+i).value;
+  const sel = document.getElementById('impCat'+i);
+  fillCatSelect(sel, type==='receita'?CATS_R:CATS_D);
+}
+function impToggleAll(v){
+  impRows.forEach((r,i)=>{ const el=document.getElementById('impChk'+i); if(el) el.checked=v; });
+}
+function commitImport(){
+  if(!impRows.length) return;
+  let n = 0;
+  if(impRows[0].kind==='tx'){
+    const acc = impAcc.value;
+    impRows.forEach((r,i)=>{
+      if(!document.getElementById('impChk'+i).checked) return;
+      const date = document.getElementById('impDate'+i).value;
+      const desc = document.getElementById('impDesc'+i).value.trim();
+      const type = document.getElementById('impType'+i).value;
+      const cat = document.getElementById('impCat'+i).value;
+      if(!date) return;
+      db.transactions.push({id:uid(), type, amount:r.amount, desc, cat, acc, toAcc:null, date});
+      n++;
+    });
+  } else {
+    impRows.forEach((r,i)=>{
+      if(!document.getElementById('impChk'+i).checked) return;
+      const date = document.getElementById('impDate'+i).value;
+      const ticker = document.getElementById('impTicker'+i).value.trim().toUpperCase();
+      const op = document.getElementById('impOp'+i).value;
+      const qty = parseFloat(document.getElementById('impQty'+i).value);
+      const price = parseFloat(document.getElementById('impPrice'+i).value);
+      if(!date || !ticker || !qty || qty<=0 || !price) return;
+      applyTrade({ticker, op, qty, price});
+      db.importedTrades.push(tradeHash({date, ticker, op, qty, price}));
+      n++;
+    });
+  }
+  save();
+  dlgImport.close();
+  alert(n+' de '+impRows.length+' lançamento(s) importado(s) com sucesso.');
 }
 
 // ===== backup =====
