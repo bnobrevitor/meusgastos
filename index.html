@@ -510,7 +510,7 @@
 <!-- DIALOG: investimento -->
 <dialog id="dlgInv">
   <form method="dialog" onsubmit="return saveInv(event)">
-    <h3>Novo ativo</h3>
+    <h3 id="invDlgTitle">Novo ativo</h3>
     <div><label>Tipo</label>
       <select id="iKind" onchange="invKindUI()">
         <option value="b3">Ação / FII / ETF (B3)</option>
@@ -518,6 +518,7 @@
         <option value="cripto">Cripto</option>
         <option value="manual">Fundo / previdência / outro</option>
       </select>
+      <p class="muted" id="iKindLockMsg" style="display:none;font-size:.75rem;margin-top:4px">O tipo não pode ser trocado ao editar — exclua e cadastre de novo se precisar mudar.</p>
     </div>
     <div id="iFb3">
       <div style="margin-bottom:12px"><label>Ticker</label><input id="iTicker" placeholder="Ex.: PETR4, MXRF11, IVVB11" style="text-transform:uppercase" onchange="quoteB3Form()"></div>
@@ -1152,12 +1153,34 @@ function invKindUI(){
   iFcripto.style.display = k==='cripto'?'':'none';
   iFmanual.style.display = k==='manual'?'':'none';
 }
-function openInvDialog(){
-  iKind.value='b3'; invKindUI();
+let editingInvId = null;
+function openInvDialog(editId){
+  editingInvId = editId || null;
+  const inv = editingInvId ? db.investments.find(i=>i.id===editingInvId) : null;
   ['iTicker','iQty','iAvg','iRfName','iPrincipal','iRate','iCoin','iCQty','iCAvg','iMName','iMInvested','iMValue'].forEach(id=>document.getElementById(id).value='');
   iStart.value = todayISO(); iIdx.value='cdi';
   formPxCripto = null; formPxB3 = null;
   iCInfo.textContent=''; iB3Info.textContent='';
+
+  invDlgTitle.textContent = inv ? 'Editar ativo' : 'Novo ativo';
+  iKind.disabled = !!inv;
+  iKindLockMsg.style.display = inv ? '' : 'none';
+
+  if(inv){
+    iKind.value = inv.kind; invKindUI();
+    if(inv.kind==='b3'){
+      iTicker.value = inv.ticker; iQty.value = inv.qty; iAvg.value = inv.avgPrice;
+      formPxB3 = inv.lastPrice||null; updB3Total();
+    } else if(inv.kind==='rf'){
+      iRfName.value = inv.name; iPrincipal.value = inv.principal; iStart.value = inv.startDate;
+      iIdx.value = inv.indexer; iRate.value = inv.rate;
+    } else if(inv.kind==='cripto'){
+      iCoin.value = inv.symbol; iCQty.value = inv.qty; iCAvg.value = inv.avgPrice;
+      formPxCripto = inv.lastPrice||null; updCriptoTotal();
+    } else {
+      iMName.value = inv.name; iMInvested.value = inv.invested; iMValue.value = inv.curValue;
+    }
+  } else { iKind.value='b3'; invKindUI(); }
   dlgInv.showModal();
 }
 
@@ -1212,23 +1235,30 @@ function updB3Total(){
 function saveInv(e){
   e.preventDefault();
   const k = iKind.value;
-  let inv = {id:uid(), kind:k};
+  const editing = editingInvId ? db.investments.find(i=>i.id===editingInvId) : null;
+  let inv = {id: editing ? editing.id : uid(), kind:k};
   const num = el => parseFloat(el.value);
+  // ao editar, preserva a última cotação conhecida (lastPrice/curValue) em vez de resetar pro preço médio digitado
   if(k==='b3'){
     if(!iTicker.value.trim() || !num(iQty) || !num(iAvg)) return alertInv();
-    inv = {...inv, ticker:iTicker.value.trim().toUpperCase(), qty:num(iQty), avgPrice:num(iAvg), lastPrice:num(iAvg)};
+    inv = {...inv, ticker:iTicker.value.trim().toUpperCase(), qty:num(iQty), avgPrice:num(iAvg),
+      lastPrice: (editing && editing.lastPrice) || num(iAvg)};
   } else if(k==='rf'){
     if(!iRfName.value.trim() || !num(iPrincipal) || !num(iRate) || !iStart.value) return alertInv();
-    inv = {...inv, name:iRfName.value.trim(), principal:num(iPrincipal), startDate:iStart.value, indexer:iIdx.value, rate:num(iRate), curValue:num(iPrincipal)};
+    inv = {...inv, name:iRfName.value.trim(), principal:num(iPrincipal), startDate:iStart.value, indexer:iIdx.value, rate:num(iRate),
+      curValue: (editing && editing.curValue) || num(iPrincipal)};
   } else if(k==='cripto'){
     const sym = iCoin.value.trim().toUpperCase();
     if(!sym || !num(iCQty) || !num(iCAvg)) return alertInv();
-    inv = {...inv, symbol:sym, coinId:COINS[sym]||iCoin.value.trim().toLowerCase(), qty:num(iCQty), avgPrice:num(iCAvg), lastPrice:num(iCAvg)};
+    inv = {...inv, symbol:sym, coinId:COINS[sym]||iCoin.value.trim().toLowerCase(), qty:num(iCQty), avgPrice:num(iCAvg),
+      lastPrice: (editing && editing.lastPrice) || num(iCAvg)};
   } else {
     if(!iMName.value.trim() || !num(iMInvested)) return alertInv();
     inv = {...inv, name:iMName.value.trim(), invested:num(iMInvested), curValue:num(iMValue)||num(iMInvested)};
   }
-  db.investments.push(inv);
+  if(editing) Object.assign(editing, inv);
+  else db.investments.push(inv);
+  editingInvId = null;
   dlgInv.close(); save();
   return false;
 }
@@ -1614,7 +1644,8 @@ function renderInv(){
       <div class="grow"><div class="t1">${esc(title)}</div><div class="t2">${esc(sub)}</div></div>
       <div style="text-align:right"><div class="amt">${fmt(v)}</div>
         <span class="pill ${p>=0?'ok':'late'}">${p>=0?'+':''}${p.toFixed(1)}%</span></div>
-      ${i.kind==='manual'?`<button class="btn sm ghost" onclick="editManual('${i.id}')" title="Atualizar valor">✎</button>`:''}
+      <button class="btn sm ghost" onclick="openInvDialog('${i.id}')" title="Editar">✎</button>
+      ${i.kind==='manual'?`<button class="btn sm ghost" onclick="editManual('${i.id}')" title="Atualizar só o valor atual">💲</button>`:''}
       <button class="btn danger" onclick="delInv('${i.id}')" title="Excluir">✕</button></div>`;
   }).join('') : '<div class="empty">Cadastre seus ativos e clique em "Atualizar cotações" para acompanhar a rentabilidade real.</div>';
   renderFire();
