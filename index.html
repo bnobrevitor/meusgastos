@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>Meus Gastos</title>
+<title>Saldo</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230B6E4F'/%3E%3Crect x='13' y='20' width='32' height='24' rx='5' fill='%23F4EFE4'/%3E%3Ccircle cx='45' cy='32' r='7' fill='%230B6E4F' stroke='%23F4EFE4' stroke-width='3'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Archivo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -88,9 +88,9 @@
 
   /* ===== redesign 2 (Claude Design: "Meus Gastos.dc.html" — paleta creme/tinta, neo-brutalista) ===== */
   .layout{display:flex;min-height:100vh}
-  .sidebar{width:236px;flex-shrink:0;background:var(--text);border-right:2px solid var(--text);padding:24px 16px;display:flex;flex-direction:column;gap:26px;position:sticky;top:0;height:100vh;overflow-y:auto}
+  .sidebar{width:236px;flex-shrink:0;background:#0B6E4F;border-right:2px solid var(--text);padding:24px 16px;display:flex;flex-direction:column;gap:26px;position:sticky;top:0;height:100vh;overflow-y:auto}
   .brand{display:flex;align-items:center;gap:10px;padding:0 8px}
-  .brand-logo{width:34px;height:34px;border-radius:9px;background:#0B6E4F;display:grid;place-items:center;flex-shrink:0;position:relative;overflow:hidden}
+  .brand-logo{width:34px;height:34px;border-radius:9px;background:#0B6E4F;border:1.5px solid rgba(246,241,231,.4);display:grid;place-items:center;flex-shrink:0;position:relative;overflow:hidden}
   .brand-logo i{position:relative;width:19px;height:14px;background:var(--bg);border-radius:3px;display:block;font-style:normal}
   .brand-logo i::after{content:'';position:absolute;right:-2px;top:5px;width:6px;height:6px;border-radius:50%;background:#0B6E4F;border:1.5px solid var(--bg)}
   .brand-name{font-weight:800;font-size:15px;letter-spacing:-.2px;color:var(--bg)}
@@ -171,7 +171,7 @@
   <div class="brand">
     <div class="brand-logo"><i></i></div>
     <div>
-      <div class="brand-name">Meus Gastos</div>
+      <div class="brand-name">Saldo</div>
       <div class="brand-sub">Finanças pessoais</div>
     </div>
   </div>
@@ -859,7 +859,7 @@ const PAGE_TITLES = {dash:'Visão geral', tx:'Lançamentos', budget:'Orçamento'
 function goTab(tab){
   document.querySelectorAll('#sideNav .nav-item').forEach(x=>x.classList.toggle('on', x.dataset.tab===tab));
   document.querySelectorAll('section.tab').forEach(s=>s.classList.toggle('on', s.id==='tab-'+tab));
-  pageTitle.textContent = PAGE_TITLES[tab]||'Meus Gastos';
+  pageTitle.textContent = PAGE_TITLES[tab]||'Saldo';
 }
 document.getElementById('sideNav').addEventListener('click', e=>{
   const b = e.target.closest('.nav-item'); if(!b) return;
@@ -1414,7 +1414,7 @@ function exportIRStatement(){
     @media print{ .noprint{display:none} body{margin:0} }
   </style></head><body>
     <h1>Demonstrativo de Investimentos</h1>
-    <div class="gen">Gerado pelo Meus Gastos em ${hoje} — posição do momento da emissão</div>
+    <div class="gen">Gerado pelo Saldo em ${hoje} — posição do momento da emissão</div>
     <div class="warn">⚠ <b>Isso não é orientação tributária.</b> É um resumo organizado a partir dos seus lançamentos manuais no app, para ajudar você (ou seu contador) a preencher a Ficha de Bens e Direitos.
       A coluna <b>"Valor de aquisição"</b> é o que normalmente vai no campo "Situação em 31/12" — o valor de mercado atual é só informativo, não costuma entrar nessa ficha.
       Os <b>códigos são sugestões</b> e podem mudar de um ano para o outro: confira sempre no programa oficial da Receita Federal do ano da sua declaração.
@@ -2214,7 +2214,7 @@ async function linkNewFile(){
   if(!fsSupported()) return alert('Seu navegador não suporta este recurso. Use Chrome ou Edge.');
   try{
     fileHandle = await showSaveFilePicker({ suggestedName:'meus-gastos-dados.json',
-      types:[{description:'Dados do Meus Gastos', accept:{'application/json':['.json']}}] });
+      types:[{description:'Dados do Saldo', accept:{'application/json':['.json']}}] });
     await idb.set('handle', fileHandle);
     await writeFile();
     hideBanner(); renderSyncUI();
@@ -2223,7 +2223,7 @@ async function linkNewFile(){
 async function linkExistingFile(){
   if(!fsSupported()) return alert('Seu navegador não suporta este recurso. Use Chrome ou Edge.');
   try{
-    const [h] = await showOpenFilePicker({ types:[{description:'Dados do Meus Gastos', accept:{'application/json':['.json']}}] });
+    const [h] = await showOpenFilePicker({ types:[{description:'Dados do Saldo', accept:{'application/json':['.json']}}] });
     const txt = await (await h.getFile()).text();
     const d = JSON.parse(txt);
     if(!d || !d.accounts){ alert('Este arquivo não é um arquivo de dados válido.'); return; }
@@ -2348,7 +2348,7 @@ async function cloudCreate(){
   try{
     const r = await fetch('https://api.github.com/gists', {
       method:'POST', headers: {Authorization:'token '+tok, Accept:'application/vnd.github+json', 'Content-Type':'application/json'},
-      body: JSON.stringify({description:'Meus Gastos — dados (privado)', public:false, files:{[CLOUD_FILE]:{content: JSON.stringify(db)}}})
+      body: JSON.stringify({description:'Saldo — dados (privado)', public:false, files:{[CLOUD_FILE]:{content: JSON.stringify(db)}}})
     });
     if(r.status===401) throw new Error('Token inválido — confira se copiou certo e marcou o escopo "gist".');
     if(!r.ok) throw new Error('Erro '+r.status+' ao criar a sincronização.');
