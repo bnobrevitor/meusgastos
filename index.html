@@ -533,7 +533,7 @@
       <div style="margin-bottom:12px"><label>Ticker</label><input id="iTicker" placeholder="Ex.: PETR4, MXRF11, IVVB11" style="text-transform:uppercase" onchange="quoteB3Form()"></div>
       <div class="g2">
         <div><label>Quantidade</label><input id="iQty" type="number" step="any" min="0" inputmode="decimal" oninput="updB3Total()"></div>
-        <div><label>Preço médio pago (R$)</label><input id="iAvg" type="number" step="any" min="0" inputmode="decimal" oninput="updB3Total()"></div>
+        <div><label>Valor total pago (R$)</label><input id="iAvg" type="number" step="any" min="0" inputmode="decimal" oninput="updB3Total()"></div>
       </div>
       <div class="muted" id="iB3Info" style="font-size:.78rem;margin-top:6px"></div>
     </div>
@@ -559,7 +559,7 @@
       <div style="margin-bottom:12px"><label>Moeda</label><input id="iCoin" placeholder="Ex.: BTC, ETH, SOL" onchange="quoteCriptoForm()"></div>
       <div class="g2">
         <div><label>Quantidade</label><input id="iCQty" type="number" step="any" min="0" inputmode="decimal" oninput="updCriptoTotal()"></div>
-        <div><label>Preço médio pago (R$)</label><input id="iCAvg" type="number" step="any" min="0" inputmode="decimal" oninput="updCriptoTotal()"></div>
+        <div><label>Valor total pago (R$)</label><input id="iCAvg" type="number" step="any" min="0" inputmode="decimal" oninput="updCriptoTotal()"></div>
       </div>
       <div class="muted" id="iCInfo" style="font-size:.78rem;margin-top:6px"></div>
     </div>
@@ -1178,14 +1178,16 @@ function openInvDialog(editId){
   if(inv){
     iKind.value = inv.kind; invKindUI();
     if(inv.kind==='b3'){
-      iTicker.value = inv.ticker; iQty.value = inv.qty; iAvg.value = inv.avgPrice;
-      formPxB3 = inv.lastPrice||null; updB3Total();
+      // reconstrói o TOTAL originalmente pago (qty × preço por cota guardado) — não recalcula
+      // pela cotação atual só de abrir a edição, senão mudaria seu custo histórico sem você pedir
+      iTicker.value = inv.ticker; iQty.value = inv.qty; iAvg.value = Math.round(inv.qty*inv.avgPrice*100)/100;
+      formPxB3 = inv.lastPrice||null;
     } else if(inv.kind==='rf'){
       iRfName.value = inv.name; iPrincipal.value = inv.principal; iStart.value = inv.startDate;
       iIdx.value = inv.indexer; iRate.value = inv.rate;
     } else if(inv.kind==='cripto'){
-      iCoin.value = inv.symbol; iCQty.value = inv.qty; iCAvg.value = inv.avgPrice;
-      formPxCripto = inv.lastPrice||null; updCriptoTotal();
+      iCoin.value = inv.symbol; iCQty.value = inv.qty; iCAvg.value = Math.round(inv.qty*inv.avgPrice*100)/100;
+      formPxCripto = inv.lastPrice||null;
     } else {
       iMName.value = inv.name; iMInvested.value = inv.invested; iMValue.value = inv.curValue;
     }
@@ -1193,7 +1195,10 @@ function openInvDialog(editId){
   dlgInv.showModal();
 }
 
-// cotação ao vivo no formulário: informe a moeda/ticker e a quantidade, o app preenche o preço e calcula o total
+// cotação ao vivo no formulário: informe o ticker/moeda e a quantidade, o app calcula sozinho
+// quantidade × cotação atual e escreve o TOTAL na caixa "Valor total pago" (não o preço por unidade —
+// o preço por unidade é guardado por baixo dos panos, dividindo esse total pela quantidade, pra rentabilidade
+// continuar certa mesmo com a caixa mostrando o total)
 let formPxCripto = null, formPxB3 = null;
 async function quoteCriptoForm(){
   const sym = iCoin.value.trim().toUpperCase();
@@ -1206,13 +1211,13 @@ async function quoteCriptoForm(){
     const j = await r.json();
     if(j[id] && j[id].brl){
       formPxCripto = j[id].brl;
-      if(!parseFloat(iCAvg.value)) iCAvg.value = formPxCripto;
       updCriptoTotal();
     } else iCInfo.textContent = '"'+sym+'" não encontrada na CoinGecko.';
-  }catch(e){ iCInfo.textContent = 'Sem conexão para buscar a cotação — preencha o preço manualmente.'; }
+  }catch(e){ iCInfo.textContent = 'Sem conexão para buscar a cotação — preencha o valor manualmente.'; }
 }
 function updCriptoTotal(){
-  // preço já vai direto pro campo "Preço médio pago" — sem repetir cotação/total num texto separado
+  const qty = parseFloat(iCQty.value)||0;
+  if(formPxCripto && qty>0) iCAvg.value = Math.round(qty*formPxCripto*100)/100;
   iCInfo.textContent = '';
 }
 async function quoteB3Form(){
@@ -1228,13 +1233,13 @@ async function quoteB3Form(){
     const q = j.results && j.results[0];
     if(r.ok && q && q.regularMarketPrice){
       formPxB3 = q.regularMarketPrice;
-      if(!parseFloat(iAvg.value)) iAvg.value = formPxB3;
       updB3Total();
     } else iB3Info.textContent = '"'+tk+'" não encontrado na brapi.';
-  }catch(e){ iB3Info.textContent = 'Sem conexão para buscar a cotação — preencha o preço manualmente.'; }
+  }catch(e){ iB3Info.textContent = 'Sem conexão para buscar a cotação — preencha o valor manualmente.'; }
 }
 function updB3Total(){
-  // preço já vai direto pro campo "Preço médio pago" — sem repetir cotação/total num texto separado
+  const qty = parseFloat(iQty.value)||0;
+  if(formPxB3 && qty>0) iAvg.value = Math.round(qty*formPxB3*100)/100;
   iB3Info.textContent = '';
 }
 function saveInv(e){
@@ -1243,11 +1248,14 @@ function saveInv(e){
   const editing = editingInvId ? db.investments.find(i=>i.id===editingInvId) : null;
   let inv = {id: editing ? editing.id : uid(), kind:k};
   const num = el => parseFloat(el.value);
-  // ao editar, preserva a última cotação conhecida (lastPrice/curValue) em vez de resetar pro preço médio digitado
+  // as caixas "Valor total pago" guardam o TOTAL (o que o usuário vê e digita); internamente
+  // dividimos pela quantidade pra guardar o preço por cota/unidade, que é o que os cálculos de
+  // rentabilidade usam. Ao editar, preserva a última cotação conhecida em vez de resetar pra essa conta.
   if(k==='b3'){
     if(!iTicker.value.trim() || !num(iQty) || !num(iAvg)) return alertInv();
-    inv = {...inv, ticker:iTicker.value.trim().toUpperCase(), qty:num(iQty), avgPrice:num(iAvg),
-      lastPrice: (editing && editing.lastPrice) || num(iAvg)};
+    const qty = num(iQty), avgPrice = num(iAvg)/qty;
+    inv = {...inv, ticker:iTicker.value.trim().toUpperCase(), qty, avgPrice,
+      lastPrice: (editing && editing.lastPrice) || avgPrice};
   } else if(k==='rf'){
     if(!iRfName.value.trim() || !num(iPrincipal) || !num(iRate) || !iStart.value) return alertInv();
     inv = {...inv, name:iRfName.value.trim(), principal:num(iPrincipal), startDate:iStart.value, indexer:iIdx.value, rate:num(iRate),
@@ -1255,8 +1263,9 @@ function saveInv(e){
   } else if(k==='cripto'){
     const sym = iCoin.value.trim().toUpperCase();
     if(!sym || !num(iCQty) || !num(iCAvg)) return alertInv();
-    inv = {...inv, symbol:sym, coinId:COINS[sym]||iCoin.value.trim().toLowerCase(), qty:num(iCQty), avgPrice:num(iCAvg),
-      lastPrice: (editing && editing.lastPrice) || num(iCAvg)};
+    const qty = num(iCQty), avgPrice = num(iCAvg)/qty;
+    inv = {...inv, symbol:sym, coinId:COINS[sym]||iCoin.value.trim().toLowerCase(), qty, avgPrice,
+      lastPrice: (editing && editing.lastPrice) || avgPrice};
   } else {
     if(!iMName.value.trim() || !num(iMInvested)) return alertInv();
     inv = {...inv, name:iMName.value.trim(), invested:num(iMInvested), curValue:num(iMValue)||num(iMInvested)};
