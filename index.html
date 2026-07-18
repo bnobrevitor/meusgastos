@@ -286,7 +286,8 @@
       <div class="card"><div class="lbl">Rentabilidade</div><div class="val" id="iProf"></div></div>
     </div>
     <div class="panel">
-      <h2>Carteira <span style="display:flex;gap:6px">
+      <h2>Carteira <span style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn sm ghost" onclick="exportIRStatement()" title="Demonstrativo para a declaração de IR">📄 Demonstrativo IR</button>
         <button class="btn sm ghost" id="btnUpd" onclick="updateQuotes()">↻ Atualizar cotações</button>
         <button class="btn sm" onclick="openInvDialog()">+ Ativo</button></span></h2>
       <div class="muted" id="iStatus" style="font-size:.78rem;margin-bottom:8px"></div>
@@ -1250,6 +1251,68 @@ function invCost(i){
 function invCur(i){
   if(i.kind==='b3'||i.kind==='cripto') return i.qty*(i.lastPrice||i.avgPrice);
   return i.curValue||invCost(i);
+}
+
+// ===== demonstrativo para declaração de IR (Bens e Direitos) =====
+// A Receita quer o valor de AQUISIÇÃO (custo) na "Situação", não o valor de mercado —
+// por isso o demonstrativo usa invCost(), com o valor atual só como informação extra.
+// Códigos são só sugestão (mudam de ano para ano) — sempre conferir no programa oficial.
+function irCode(i){
+  if(i.kind==='b3'){
+    const isFII = /11$/.test(i.ticker||'');
+    return isFII ? ['73','Fundo de investimento imobiliário'] : ['31','Ações (inclusive as listadas em bolsa)'];
+  }
+  if(i.kind==='cripto') return (i.symbol==='BTC') ? ['81','Bitcoin'] : ['82','Outras criptomoedas'];
+  if(i.kind==='rf') return ['45','Aplicação de renda fixa (CDB, RDB, Tesouro e outros)'];
+  return ['79','Outras aplicações e investimentos'];
+}
+function irDiscrim(i){
+  if(i.kind==='b3') return i.qty+' unidade(s), preço médio '+fmt(i.avgPrice);
+  if(i.kind==='cripto') return i.qty+' unidade(s) de '+esc(i.symbol)+', preço médio '+fmt(i.avgPrice);
+  if(i.kind==='rf') return String(i.rate).replace('.',',')+' '+IDX_LBL[i.indexer]+', aplicado em '+fmtDate(i.startDate);
+  return 'Registro manual';
+}
+function exportIRStatement(){
+  const list = db.investments;
+  const w = window.open('', '_blank');
+  if(!w){ alert('Seu navegador bloqueou a nova aba. Permita pop-ups para este site e tente de novo.'); return; }
+  const hoje = fmtDate(todayISO());
+  let rows = '', totCusto = 0, totAtual = 0;
+  if(list.length){
+    const ordenada = [...list].sort((a,b)=>invName(a).localeCompare(invName(b)));
+    for(const i of ordenada){
+      const [cod, codLbl] = irCode(i);
+      const custo = invCost(i), atual = invCur(i);
+      totCusto += custo; totAtual += atual;
+      rows += `<tr><td>${cod}</td><td>${esc(codLbl)}</td><td><b>${esc(invName(i))}</b><br><span class="sub">${irDiscrim(i)}</span></td>
+        <td class="r">${fmt(custo)}</td><td class="r">${fmt(atual)}</td></tr>`;
+    }
+  }
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Demonstrativo de Investimentos — IR</title><style>
+    body{font-family:Arial,Helvetica,sans-serif;color:#111;max-width:900px;margin:30px auto;padding:0 20px;line-height:1.5}
+    h1{font-size:20px;margin-bottom:2px} .gen{color:#666;font-size:12px;margin-bottom:18px}
+    .warn{background:#fff8e1;border:1px solid #e0c200;border-radius:8px;padding:12px 14px;font-size:13px;margin-bottom:20px}
+    table{width:100%;border-collapse:collapse;font-size:13px} th,td{border:1px solid #ccc;padding:8px;text-align:left;vertical-align:top}
+    th{background:#f0f0f0} td.r,th.r{text-align:right} .sub{color:#666;font-size:11.5px}
+    tfoot td{font-weight:bold;background:#f7f7f7} .empty{color:#666;padding:20px;text-align:center}
+    .noprint{margin:18px 0} button{font-size:14px;padding:8px 16px;cursor:pointer}
+    @media print{ .noprint{display:none} body{margin:0} }
+  </style></head><body>
+    <h1>Demonstrativo de Investimentos</h1>
+    <div class="gen">Gerado pelo Meus Gastos em ${hoje} — posição do momento da emissão</div>
+    <div class="warn">⚠ <b>Isso não é orientação tributária.</b> É um resumo organizado a partir dos seus lançamentos manuais no app, para ajudar você (ou seu contador) a preencher a Ficha de Bens e Direitos.
+      A coluna <b>"Valor de aquisição"</b> é o que normalmente vai no campo "Situação em 31/12" — o valor de mercado atual é só informativo, não costuma entrar nessa ficha.
+      Os <b>códigos são sugestões</b> e podem mudar de um ano para o outro: confira sempre no programa oficial da Receita Federal do ano da sua declaração.
+      Para o campo "Situação em 31/12 do ano anterior", use o que você já declarou no ano passado (o próprio programa da Receita costuma trazer isso pronto).
+      Para ganho de capital de ativos <b>vendidos</b> durante o ano e para conferência oficial dos rendimentos, use o <b>Informe de Rendimentos</b> que sua corretora/banco é obrigada a fornecer — ele é a fonte oficial, este demonstrativo é só um organizador.</div>
+    ${list.length ? `<table><thead><tr><th>Código</th><th>Tipo</th><th>Ativo</th><th class="r">Valor de aquisição</th><th class="r">Valor atual (informativo)</th></tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr><td colspan="3">Total</td><td class="r">${fmt(totCusto)}</td><td class="r">${fmt(totAtual)}</td></tr></tfoot></table>`
+      : '<div class="empty">Nenhum investimento cadastrado.</div>'}
+    <div class="noprint"><button onclick="window.print()">🖨️ Imprimir / Salvar como PDF</button></div>
+  </body></html>`;
+  w.document.write(html);
+  w.document.close();
 }
 function saveTok(){
   db.settings.brapiToken = brapiTok.value.trim();
