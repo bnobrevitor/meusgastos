@@ -1212,10 +1212,8 @@ async function quoteCriptoForm(){
   }catch(e){ iCInfo.textContent = 'Sem conexão para buscar a cotação — preencha o preço manualmente.'; }
 }
 function updCriptoTotal(){
-  const q = parseFloat(iCQty.value)||0, p = parseFloat(iCAvg.value)||0;
-  let txt = formPxCripto ? 'Cotação atual: '+fmt(formPxCripto)+'. ' : '';
-  if(q>0 && p>0) txt += 'Total pago: '+fmt(q*p)+' ('+q+' × '+fmt(p)+').';
-  iCInfo.textContent = txt;
+  // preço já vai direto pro campo "Preço médio pago" — sem repetir cotação/total num texto separado
+  iCInfo.textContent = '';
 }
 async function quoteB3Form(){
   const tk = iTicker.value.trim().toUpperCase();
@@ -1236,10 +1234,8 @@ async function quoteB3Form(){
   }catch(e){ iB3Info.textContent = 'Sem conexão para buscar a cotação — preencha o preço manualmente.'; }
 }
 function updB3Total(){
-  const q = parseFloat(iQty.value)||0, p = parseFloat(iAvg.value)||0;
-  let txt = formPxB3 ? 'Cotação atual: '+fmt(formPxB3)+'. ' : '';
-  if(q>0 && p>0) txt += 'Total pago: '+fmt(q*p)+' ('+q+' × '+fmt(p)+').';
-  iB3Info.textContent = txt;
+  // preço já vai direto pro campo "Preço médio pago" — sem repetir cotação/total num texto separado
+  iB3Info.textContent = '';
 }
 function saveInv(e){
   e.preventDefault();
