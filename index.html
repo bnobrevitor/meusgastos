@@ -336,15 +336,24 @@
     </div>
     <div class="panel">
       <h2>Token brapi.dev — cotações da B3</h2>
-      <div style="display:flex;gap:8px">
-        <input id="brapiTok" placeholder="Cole aqui seu token gratuito do brapi.dev">
-        <button class="btn sm" onclick="saveTok()">Salvar</button>
+      <div id="brapiConfirmed" style="display:none">
+        <div class="row" style="padding:0;border-bottom:none">
+          <span class="pill ok">✓ Token configurado</span>
+          <div class="grow"></div>
+          <button class="btn sm ghost" onclick="brapiShowSetup()">Trocar / remover</button>
+        </div>
       </div>
-      <p class="muted" style="font-size:.78rem;margin-top:8px">
-        Crie grátis em <b>brapi.dev</b> (Login → Dashboard → copiar o token). Necessário só para ações/FIIs/ETFs.
-        Renda fixa usa a API pública do Banco Central (CDI/Selic/IPCA reais, dia a dia) e cripto usa a CoinGecko — nenhuma das duas precisa de token.
-        Valores de renda fixa são <b>brutos</b> (sem descontar IR).
-      </p>
+      <div id="brapiSetup">
+        <div style="display:flex;gap:8px">
+          <input id="brapiTok" placeholder="Cole aqui seu token gratuito do brapi.dev">
+          <button class="btn sm" onclick="saveTok()">Salvar</button>
+        </div>
+        <p class="muted" style="font-size:.78rem;margin-top:8px">
+          Crie grátis em <b>brapi.dev</b> (Login → Dashboard → copiar o token). Necessário só para ações/FIIs/ETFs — é só uma vez, o app lembra depois de salvo.
+          Renda fixa usa a API pública do Banco Central (CDI/Selic/IPCA reais, dia a dia) e cripto usa a CoinGecko — nenhuma das duas precisa de token.
+          Valores de renda fixa são <b>brutos</b> (sem descontar IR).
+        </p>
+      </div>
     </div>
   </section>
 
@@ -1344,10 +1353,19 @@ function exportIRStatement(){
   w.document.write(html);
   w.document.close();
 }
+let brapiForceSetup = false;
 function saveTok(){
   db.settings.brapiToken = brapiTok.value.trim();
+  brapiForceSetup = false;
   save();
   iStatus.textContent = db.settings.brapiToken ? 'Token salvo ✓' : 'Token removido.';
+}
+function brapiShowSetup(){
+  brapiForceSetup = true;
+  brapiTok.value = '';
+  brapiSetup.style.display = '';
+  brapiConfirmed.style.display = 'none';
+  brapiTok.focus();
 }
 
 // --- rendimento de renda fixa via API do Banco Central ---
@@ -1609,7 +1627,11 @@ function chartLegend(series){
 }
 
 function renderInv(){
-  brapiTok.value = db.settings.brapiToken||'';
+  const tokSet = !!db.settings.brapiToken;
+  const showSetup = !tokSet || brapiForceSetup;
+  brapiSetup.style.display = showSetup ? '' : 'none';
+  brapiConfirmed.style.display = showSetup ? 'none' : '';
+  if(showSetup) brapiTok.value = brapiForceSetup ? '' : (db.settings.brapiToken||'');
   const prevAsset = cAsset.value;
   cAsset.innerHTML = '<option value="">Todos os ativos</option>'+db.investments.map(i=>`<option value="${i.id}">${esc(invName(i))}</option>`).join('');
   if([...cAsset.options].some(o=>o.value===prevAsset)) cAsset.value = prevAsset;
