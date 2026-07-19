@@ -14,6 +14,12 @@ async function run() {
   r = await worker.fetch(req('/qualquer-coisa'), { SHARED_TOKEN: 'abc' });
   chk('rota desconhecida = 404', r.status === 404);
 
+  // ---- /webhook: rota pública exigida pela Pluggy pra aprovar acesso a dados reais ----
+  r = await worker.fetch(req('/webhook', { method: 'POST' }), {});
+  chk('webhook POST sem token nenhum = 200 (é a Pluggy chamando, não o app)', r.status === 200);
+  r = await worker.fetch(req('/webhook', { method: 'GET' }), {});
+  chk('webhook GET = 405 (só aceita POST)', r.status === 405);
+
   // ---- sem token ----
   r = await worker.fetch(req('/sync'), { SHARED_TOKEN: 'abc' });
   chk('sem header Authorization = 401', r.status === 401);

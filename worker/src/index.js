@@ -125,6 +125,15 @@ async function handleRequest(request, env) {
   if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
 
   const url = new URL(request.url);
+
+  // Endpoint público exigido pela Pluggy pra liberar acesso a dados reais (produção).
+  // A sincronização em si é sob demanda (usuário clica "Atualizar do banco"), então aqui só
+  // confirmamos o recebimento do evento — nenhuma credencial da Pluggy passa por essa rota.
+  if (url.pathname === '/webhook') {
+    if (request.method !== 'POST') return json({ error: 'método não suportado' }, 405);
+    return new Response(null, { status: 200 });
+  }
+
   if (url.pathname !== '/sync' && url.pathname !== '/connect-token') return json({ error: 'not found' }, 404);
   if (request.method !== 'GET') return json({ error: 'método não suportado' }, 405);
 
