@@ -1,0 +1,72 @@
+import worker from './index.js';
+
+const T = [];
+const chk = (name, cond, extra) => T.push([name, !!cond, extra]);
+const req = (path, opts = {}) => new Request('https://worker.example.com' + path, opts);
+
+async function run() {
+  // ---- OPTIONS (preflight CORS) não exige token ----
+  let r = await worker.fetch(req('/sync', { method: 'OPTIONS' }), {});
+  chk('OPTIONS responde sem exigir token', r.status === 200 || r.status === 204, r.status);
+  chk('OPTIONS libera a origem certa', r.headers.get('Access-Control-Allow-Origin') === 'https://bnobrevitor.github.io');
+
+  // ---- rota errada ----
+  r = await worker.fetch(req('/qualquer-coisa'), { SHARED_TOKEN: 'abc' });
+  chk('rota desconhecida = 404', r.status === 404);
+
+  // ---- sem token ----
+  r = await worker.fetch(req('/sync'), { SHARED_TOKEN: 'abc' });
+  chk('sem header Authorization = 401', r.status === 401);
+
+  // ---- token errado ----
+  r = await worker.fetch(req('/sync', { headers: { Authorization: 'Bearer errado' } }), { SHARED_TOKEN: 'abc' });
+  chk('token errado = 401', r.status === 401);
+
+  // ---- token certo, mas Worker sem credenciais Pluggy configuradas ----
+  r = await worker.fetch(req('/sync', { headers: { Authorization: 'Bearer abc' } }), { SHARED_TOKEN: 'abc' });
+  chk('sem PLUGGY_CLIENT_ID/SECRET = 500 (nunca tenta chamar a Pluggy)', r.status === 500);
+
+  // ---- token certo + credenciais presentes, mas Pluggy responde erro (simulado) ----
+  const origFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (String(url).includes('/auth')) return new Response('erro', { status: 401 });
+    throw new Error('não deveria chamar outra URL antes de autenticar');
+  };
+  r = await worker.fetch(req('/sync', { headers: { Authorization: 'Bearer abc' } }), {
+    SHARED_TOKEN: 'abc', PLUGGY_CLIENT_ID: 'fake', PLUGGY_CLIENT_SECRET: 'fake',
+  });
+  const bodyErr = await r.json();
+  chk('falha de auth na Pluggy = 502 com mensagem clara', r.status === 502 && bodyErr.error.includes('autenticar'));
+
+  // ---- fluxo feliz completo, simulando as 3 chamadas da Pluggy ----
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/auth')) return Response.json({ apiKey: 'token-fake-123' });
+    if (u.includes('/items')) return Response.json({ results: [{ id: 'item1' }] });
+    if (u.includes('/accounts')) return Response.json({ results: [{ id: 'acc1', name: 'Conta Corrente', balance: 1234.56 }] });
+    if (u.includes('/v2/transactions')) return Response.json({
+      results: [
+        { id: 't1', date: '2026-07-15T00:00:00Z', description: 'UBER TRIP', amount: -45.9, type: 'DEBIT' },
+        { id: 't2', date: '2026-07-05T00:00:00Z', description: 'SALARIO', amount: 4500, type: 'CREDIT' },
+      ],
+    });
+    throw new Error('URL inesperada: ' + u);
+  };
+  r = await worker.fetch(req('/sync', { headers: { Authorization: 'Bearer abc' } }), {
+    SHARED_TOKEN: 'abc', PLUGGY_CLIENT_ID: 'fake', PLUGGY_CLIENT_SECRET: 'fake',
+  });
+  const body = await r.json();
+  chk('fluxo feliz = 200', r.status === 200);
+  chk('1 conta retornada', body.accounts.length === 1 && body.accounts[0].nome === 'Conta Corrente');
+  chk('2 transações retornadas, já no formato do app', body.transactions.length === 2 && body.transactions[0].kind === 'tx');
+  chk('resposta tem CORS liberado', r.headers.get('Access-Control-Allow-Origin') === 'https://bnobrevitor.github.io');
+
+  global.fetch = origFetch;
+
+  const falhas = T.filter(t => !t[1]);
+  console.log(JSON.stringify(T, null, 0));
+  console.log(falhas.length ? `\n${falhas.length} TESTE(S) FALHARAM` : `\nTODOS OS ${T.length} TESTES PASSARAM`);
+  process.exit(falhas.length ? 1 : 0);
+}
+
+run();

@@ -262,6 +262,7 @@
       <select id="fAcc" onchange="renderTx()"></select>
       <input id="fSearch" placeholder="Buscar..." oninput="renderTx()">
       <button class="btn sm ghost" onclick="openImportDialog('tx')">📥 Importar extrato</button>
+      <button class="btn sm ghost" id="btnBankSync" onclick="syncBankData()">🏦 Atualizar do banco</button>
     </div>
     <div class="panel" id="txList"></div>
   </section>
@@ -748,6 +749,18 @@
       <button type="button" class="btn sm danger" onclick="cloudDisconnect()">Desconectar</button>
     </div>
     <p class="muted" style="font-size:.75rem">1) Crie um token grátis <a href="https://github.com/settings/tokens/new?scopes=gist&amp;description=Meus+Gastos" target="_blank" rel="noopener">clicando aqui</a> (marque só o escopo "gist") e cole acima. 2) Clique em "Criar sincronização nova" — vai aparecer um <b>ID de sincronização</b>: copie e cole nesse mesmo campo no seu celular, junto com um token (pode ser o mesmo), e clique em "Conectar".</p>
+    <hr style="border:none;border-top:1px solid var(--line)">
+    <b style="font-size:.9rem">Conexão bancária em tempo real (Open Finance)</b>
+    <p class="muted" id="bankStatus" style="font-size:.8rem"></p>
+    <div id="bankSetup" style="display:flex;flex-direction:column;gap:8px">
+      <input id="bankWorkerUrl" placeholder="URL do seu Worker (ex.: https://saldo-bank-sync.SEUNOME.workers.dev)">
+      <input id="bankToken" placeholder="Token compartilhado (o mesmo que você configurou no Worker)">
+      <button type="button" class="btn sm" onclick="bankSaveConfig()">Salvar</button>
+    </div>
+    <div id="bankConnected" style="display:none;gap:8px;flex-wrap:wrap">
+      <button type="button" class="btn sm danger" onclick="bankShowSetup()">Trocar / remover</button>
+    </div>
+    <p class="muted" style="font-size:.75rem">Isso conecta com o Worker do Cloudflare que você publicou — ele busca os dados no Meu Pluggy. Nenhuma credencial bancária passa por aqui, só o endereço do Worker e o token combinado entre os dois. Depois de configurar, use o botão "🏦 Atualizar do banco" na aba Lançamentos.</p>
     <div class="actions"><button class="btn ghost">Fechar</button></div>
   </form>
 </dialog>
@@ -2398,6 +2411,59 @@ async function initCloud(){
   if(cloudCfg.token && cloudCfg.gistId) await cloudSyncNow(true);
 }
 
+// ===== conexão bancária em tempo real (Cloudflare Worker + Meu Pluggy) =====
+// Config fica FORA de db (localStorage separado), mesmo motivo do token de nuvem: nunca deve
+// ser incluída em backups/sincronização — é específica de cada aparelho.
+const BANK_KEY = 'gastosBank';
+let bankCfg = {};
+try{ bankCfg = JSON.parse(localStorage.getItem(BANK_KEY)) || {}; }catch(e){ bankCfg = {}; }
+
+function saveBankCfg(){ localStorage.setItem(BANK_KEY, JSON.stringify(bankCfg)); }
+function bankSaveConfig(){
+  const url = bankWorkerUrl.value.trim().replace(/\/+$/,'');
+  const tok = bankToken.value.trim();
+  if(!url || !tok){ bankStatus.textContent = 'Preencha a URL do Worker e o token.'; return; }
+  bankCfg = {url, token:tok};
+  saveBankCfg();
+  renderBankUI();
+}
+function bankShowSetup(){
+  bankCfg = {}; localStorage.removeItem(BANK_KEY);
+  renderBankUI();
+}
+function renderBankUI(){
+  if(!document.getElementById('bankStatus')) return;
+  const connected = !!(bankCfg.url && bankCfg.token);
+  bankSetup.style.display = connected ? 'none' : '';
+  bankConnected.style.display = connected ? 'flex' : 'none';
+  bankStatus.textContent = connected ? '✓ Conectado ao Worker' : 'Nenhuma conexão bancária configurada ainda.';
+  if(connected){ bankWorkerUrl.value=''; bankToken.value=''; }
+}
+async function syncBankData(){
+  if(!bankCfg.url || !bankCfg.token){
+    alert('Configure a conexão bancária primeiro (⤓ Backup → Conexão bancária em tempo real).');
+    return;
+  }
+  const btn = document.getElementById('btnBankSync');
+  const orig = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Buscando...'; }
+  try{
+    const r = await fetch(bankCfg.url+'/sync', {headers:{Authorization:'Bearer '+bankCfg.token}});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error || ('Erro HTTP '+r.status));
+    if(!j.transactions || !j.transactions.length){
+      alert('Nenhuma transação encontrada nos últimos 90 dias.');
+      return;
+    }
+    openImportDialog('tx');
+    startReview(j.transactions);
+  }catch(e){
+    alert('Erro ao buscar dados do banco: '+(e.message||'falha desconhecida'));
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
 // ===== importação de extrato (OFX / CSV / PDF) =====
 // linhas normalizadas: {kind:'tx', date, desc, amount, type} para banco
 //                    ou {kind:'inv', date, ticker, op:'compra'|'venda', qty, price} para corretora
@@ -3055,6 +3121,7 @@ localStorage.setItem(KEY, JSON.stringify(db));
 renderAll();
 initFS();
 initCloud();
+renderBankUI();
 </script>
 </body>
 </html>
