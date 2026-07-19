@@ -67,7 +67,11 @@ async function pluggyAuth(clientId, clientSecret) {
 
 async function pluggyGet(path, apiKey) {
   const r = await fetch(`${PLUGGY_BASE}${path}`, { headers: { 'X-API-KEY': apiKey } });
-  if (!r.ok) throw new Error('Erro na Pluggy em ' + path + ' (HTTP ' + r.status + ')');
+  if (!r.ok) {
+    let detail = '';
+    try { const j = await r.json(); detail = j.message || j.error || JSON.stringify(j); } catch (e) {}
+    throw new Error('Erro na Pluggy em ' + path + ' (HTTP ' + r.status + ')' + (detail ? ': ' + detail : ''));
+  }
   return r.json();
 }
 
