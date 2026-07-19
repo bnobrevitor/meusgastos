@@ -63,6 +63,36 @@ async function run() {
 
   global.fetch = origFetch;
 
+  // ---- /connect-token: rota nova pra reconectar o banco pela NOSSA aplicação ----
+  r = await worker.fetch(req('/connect-token'), { SHARED_TOKEN: 'abc' });
+  chk('connect-token sem Authorization = 401', r.status === 401);
+
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/auth')) return Response.json({ apiKey: 'token-fake-123' });
+    if (u.includes('/connect_token')) return Response.json({ accessToken: 'connect-token-fake-456' });
+    throw new Error('URL inesperada: ' + u);
+  };
+  r = await worker.fetch(req('/connect-token', { headers: { Authorization: 'Bearer abc' } }), {
+    SHARED_TOKEN: 'abc', PLUGGY_CLIENT_ID: 'fake', PLUGGY_CLIENT_SECRET: 'fake',
+  });
+  const ctBody = await r.json();
+  chk('connect-token feliz = 200 com connectToken', r.status === 200 && ctBody.connectToken === 'connect-token-fake-456');
+
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/auth')) return Response.json({ apiKey: 'token-fake-123' });
+    if (u.includes('/connect_token')) return new Response(JSON.stringify({ message: 'Client não autorizado a criar connect token' }), { status: 403 });
+    throw new Error('URL inesperada: ' + u);
+  };
+  r = await worker.fetch(req('/connect-token', { headers: { Authorization: 'Bearer abc' } }), {
+    SHARED_TOKEN: 'abc', PLUGGY_CLIENT_ID: 'fake', PLUGGY_CLIENT_SECRET: 'fake',
+  });
+  const ctErrBody = await r.json();
+  chk('connect-token com erro da Pluggy = 502 com mensagem detalhada', r.status === 502 && ctErrBody.error.includes('não autorizado a criar'));
+
+  global.fetch = origFetch;
+
   const falhas = T.filter(t => !t[1]);
   console.log(JSON.stringify(T, null, 0));
   console.log(falhas.length ? `\n${falhas.length} TESTE(S) FALHARAM` : `\nTODOS OS ${T.length} TESTES PASSARAM`);

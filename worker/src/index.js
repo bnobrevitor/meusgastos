@@ -75,6 +75,24 @@ async function pluggyGet(path, apiKey) {
   return r.json();
 }
 
+// Gera um Connect Token vinculado à NOSSA aplicação (nosso clientId), pra reconectar o banco
+// pelo widget oficial em vez de depender de um item criado por outro app (ex.: "Meu Pluggy").
+async function pluggyCreateConnectToken(apiKey) {
+  const r = await fetch(`${PLUGGY_BASE}/connect_token`, {
+    method: 'POST',
+    headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  if (!r.ok) {
+    let detail = '';
+    try { const j = await r.json(); detail = j.message || j.error || JSON.stringify(j); } catch (e) {}
+    throw new Error('Erro ao criar connect token na Pluggy (HTTP ' + r.status + ')' + (detail ? ': ' + detail : ''));
+  }
+  const j = await r.json();
+  if (!j.accessToken) throw new Error('Pluggy não retornou accessToken');
+  return j.accessToken;
+}
+
 async function fetchAllBankData(env) {
   const apiKey = await pluggyAuth(env.PLUGGY_CLIENT_ID, env.PLUGGY_CLIENT_SECRET);
   const itemsResp = await pluggyGet('/items', apiKey);
@@ -107,7 +125,7 @@ async function handleRequest(request, env) {
   if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders() });
 
   const url = new URL(request.url);
-  if (url.pathname !== '/sync') return json({ error: 'not found' }, 404);
+  if (url.pathname !== '/sync' && url.pathname !== '/connect-token') return json({ error: 'not found' }, 404);
   if (request.method !== 'GET') return json({ error: 'método não suportado' }, 405);
 
   if (!isAuthorized(request, env.SHARED_TOKEN)) {
@@ -115,6 +133,16 @@ async function handleRequest(request, env) {
   }
   if (!env.PLUGGY_CLIENT_ID || !env.PLUGGY_CLIENT_SECRET) {
     return json({ error: 'Worker sem credenciais da Pluggy configuradas (secrets ausentes)' }, 500);
+  }
+
+  if (url.pathname === '/connect-token') {
+    try {
+      const apiKey = await pluggyAuth(env.PLUGGY_CLIENT_ID, env.PLUGGY_CLIENT_SECRET);
+      const connectToken = await pluggyCreateConnectToken(apiKey);
+      return json({ connectToken });
+    } catch (e) {
+      return json({ error: e.message || 'erro desconhecido ao criar connect token' }, 502);
+    }
   }
 
   try {
@@ -126,4 +154,4 @@ async function handleRequest(request, env) {
 }
 
 export default { fetch: handleRequest };
-export { mapPluggyTransaction, mapPluggyAccount, isAuthorized };
+export { mapPluggyTransaction, mapPluggyAccount, isAuthorized, pluggyCreateConnectToken };

@@ -758,6 +758,7 @@
       <button type="button" class="btn sm" onclick="bankSaveConfig()">Salvar</button>
     </div>
     <div id="bankConnected" style="display:none;gap:8px;flex-wrap:wrap">
+      <button type="button" class="btn sm" onclick="connectBank()">🔗 Conectar/reconectar banco</button>
       <button type="button" class="btn sm danger" onclick="bankShowSetup()">Trocar / remover</button>
     </div>
     <p class="muted" style="font-size:.75rem">Isso conecta com o Worker do Cloudflare que você publicou — ele busca os dados no Meu Pluggy. Nenhuma credencial bancária passa por aqui, só o endereço do Worker e o token combinado entre os dois. Depois de configurar, use o botão "🏦 Atualizar do banco" na aba Lançamentos.</p>
@@ -2438,6 +2439,44 @@ function renderBankUI(){
   bankConnected.style.display = connected ? 'flex' : 'none';
   bankStatus.textContent = connected ? '✓ Conectado ao Worker' : 'Nenhuma conexão bancária configurada ainda.';
   if(connected){ bankWorkerUrl.value=''; bankToken.value=''; }
+}
+let pluggyConnectLoading = null;
+function ensurePluggyConnect(){
+  if(window.PluggyConnect) return Promise.resolve();
+  if(pluggyConnectLoading) return pluggyConnectLoading;
+  pluggyConnectLoading = new Promise((resolve, reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdn.pluggy.ai/pluggy-connect/latest/pluggy-connect.js';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Não foi possível carregar o widget da Pluggy (sem conexão?).'));
+    document.head.appendChild(s);
+  });
+  return pluggyConnectLoading;
+}
+async function connectBank(){
+  if(!bankCfg.url || !bankCfg.token){
+    alert('Configure a conexão bancária primeiro.');
+    return;
+  }
+  try{
+    const r = await fetch(bankCfg.url+'/connect-token', {headers:{Authorization:'Bearer '+bankCfg.token}});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error || ('Erro HTTP '+r.status));
+    await ensurePluggyConnect();
+    const pluggyConnect = new PluggyConnect({
+      connectToken: j.connectToken,
+      includeSandbox: false,
+      onSuccess: () => {
+        alert('Banco conectado com sucesso! Agora clique em "🏦 Atualizar do banco" na aba Lançamentos pra puxar o extrato.');
+      },
+      onError: (error) => {
+        alert('Erro ao conectar o banco: '+(error && error.message ? error.message : 'falha desconhecida'));
+      },
+    });
+    pluggyConnect.init();
+  }catch(e){
+    alert('Erro ao iniciar a conexão com o banco: '+(e.message||'falha desconhecida'));
+  }
 }
 async function syncBankData(){
   if(!bankCfg.url || !bankCfg.token){
