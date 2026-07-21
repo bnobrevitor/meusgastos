@@ -93,18 +93,24 @@ async function pluggyCreateConnectToken(apiKey) {
   return j.accessToken;
 }
 
+// IDs das conexões (items) feitas no Meu Pluggy — GET /items (listar tudo) não é permitido
+// pra essa aplicação, então usamos direto os Item IDs, um por banco conectado, vindos do secret
+// PLUGGY_ITEM_IDS (separados por vírgula).
+function parseItemIds(env) {
+  return String(env.PLUGGY_ITEM_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
 async function fetchAllBankData(env) {
   const apiKey = await pluggyAuth(env.PLUGGY_CLIENT_ID, env.PLUGGY_CLIENT_SECRET);
-  const itemsResp = await pluggyGet('/items', apiKey);
-  const items = itemsResp.results || (Array.isArray(itemsResp) ? itemsResp : []);
-  if (!items.length) throw new Error('Nenhuma conta conectada encontrada no Meu Pluggy — conecte um banco pelo painel primeiro.');
+  const itemIds = parseItemIds(env);
+  if (!itemIds.length) throw new Error('Nenhum Item ID configurado (secret PLUGGY_ITEM_IDS ausente ou vazio).');
 
   const accounts = [];
   const transactions = [];
   const from = new Date(Date.now() - DAYS_BACK * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
-  for (const item of items) {
-    const accResp = await pluggyGet(`/accounts?itemId=${encodeURIComponent(item.id)}`, apiKey);
+  for (const itemId of itemIds) {
+    const accResp = await pluggyGet(`/accounts?itemId=${encodeURIComponent(itemId)}`, apiKey);
     const accs = accResp.results || [];
     for (const acc of accs) {
       accounts.push(mapPluggyAccount(acc));

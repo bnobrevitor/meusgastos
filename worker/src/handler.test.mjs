@@ -44,12 +44,26 @@ async function run() {
   const bodyErr = await r.json();
   chk('falha de auth na Pluggy = 502 com mensagem clara', r.status === 502 && bodyErr.error.includes('autenticar'));
 
-  // ---- fluxo feliz completo, simulando as 3 chamadas da Pluggy ----
+  // ---- sem PLUGGY_ITEM_IDS configurado (credenciais ok, mas nenhum banco listado) ----
+  global.fetch = async (url) => {
+    if (String(url).includes('/auth')) return Response.json({ apiKey: 'token-fake-123' });
+    throw new Error('não deveria chamar mais nada sem Item ID configurado: ' + url);
+  };
+  r = await worker.fetch(req('/sync', { headers: { Authorization: 'Bearer abc' } }), {
+    SHARED_TOKEN: 'abc', PLUGGY_CLIENT_ID: 'fake', PLUGGY_CLIENT_SECRET: 'fake',
+  });
+  const noItemBody = await r.json();
+  chk('sem PLUGGY_ITEM_IDS = 502 com mensagem clara', r.status === 502 && noItemBody.error.includes('Nenhum Item ID'));
+
+  // ---- fluxo feliz completo, com 2 Item IDs configurados (2 bancos) ----
+  const calledAccountsFor = [];
   global.fetch = async (url) => {
     const u = String(url);
     if (u.includes('/auth')) return Response.json({ apiKey: 'token-fake-123' });
-    if (u.includes('/items')) return Response.json({ results: [{ id: 'item1' }] });
-    if (u.includes('/accounts')) return Response.json({ results: [{ id: 'acc1', name: 'Conta Corrente', balance: 1234.56 }] });
+    if (u.includes('/accounts')) {
+      calledAccountsFor.push(new URL(u).searchParams.get('itemId'));
+      return Response.json({ results: [{ id: 'acc1', name: 'Conta Corrente', balance: 1234.56 }] });
+    }
     if (u.includes('/v2/transactions')) return Response.json({
       results: [
         { id: 't1', date: '2026-07-15T00:00:00Z', description: 'UBER TRIP', amount: -45.9, type: 'DEBIT' },
@@ -59,12 +73,13 @@ async function run() {
     throw new Error('URL inesperada: ' + u);
   };
   r = await worker.fetch(req('/sync', { headers: { Authorization: 'Bearer abc' } }), {
-    SHARED_TOKEN: 'abc', PLUGGY_CLIENT_ID: 'fake', PLUGGY_CLIENT_SECRET: 'fake',
+    SHARED_TOKEN: 'abc', PLUGGY_CLIENT_ID: 'fake', PLUGGY_CLIENT_SECRET: 'fake', PLUGGY_ITEM_IDS: 'item1, item2',
   });
   const body = await r.json();
   chk('fluxo feliz = 200', r.status === 200);
-  chk('1 conta retornada', body.accounts.length === 1 && body.accounts[0].nome === 'Conta Corrente');
-  chk('2 transações retornadas, já no formato do app', body.transactions.length === 2 && body.transactions[0].kind === 'tx');
+  chk('busca contas dos 2 Item IDs configurados (sem listar /items)', calledAccountsFor.length === 2 && calledAccountsFor[0] === 'item1' && calledAccountsFor[1] === 'item2');
+  chk('2 contas retornadas (1 por item)', body.accounts.length === 2 && body.accounts[0].nome === 'Conta Corrente');
+  chk('4 transações retornadas, já no formato do app', body.transactions.length === 4 && body.transactions[0].kind === 'tx');
   chk('resposta tem CORS liberado', r.headers.get('Access-Control-Allow-Origin') === 'https://bnobrevitor.github.io');
 
   global.fetch = origFetch;

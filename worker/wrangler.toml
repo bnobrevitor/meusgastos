@@ -6,3 +6,4 @@ compatibility_date = "2026-07-01"
 #   wrangler secret put PLUGGY_CLIENT_ID
 #   wrangler secret put PLUGGY_CLIENT_SECRET
 #   wrangler secret put SHARED_TOKEN
+#   wrangler secret put PLUGGY_ITEM_IDS   (Item IDs do Meu Pluggy, separados por vírgula)
