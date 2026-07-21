@@ -115,7 +115,7 @@ async function fetchAllBankData(env) {
     for (const acc of accs) {
       accounts.push(mapPluggyAccount(acc));
       const txResp = await pluggyGet(
-        `/v2/transactions?accountId=${encodeURIComponent(acc.id)}&from=${from}&pageSize=500`,
+        `/transactions?accountId=${encodeURIComponent(acc.id)}&from=${from}`,
         apiKey
       );
       const txs = txResp.results || [];

@@ -64,7 +64,7 @@ async function run() {
       calledAccountsFor.push(new URL(u).searchParams.get('itemId'));
       return Response.json({ results: [{ id: 'acc1', name: 'Conta Corrente', balance: 1234.56 }] });
     }
-    if (u.includes('/v2/transactions')) return Response.json({
+    if (u.includes('/transactions')) return Response.json({
       results: [
         { id: 't1', date: '2026-07-15T00:00:00Z', description: 'UBER TRIP', amount: -45.9, type: 'DEBIT' },
         { id: 't2', date: '2026-07-05T00:00:00Z', description: 'SALARIO', amount: 4500, type: 'CREDIT' },
