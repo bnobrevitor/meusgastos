@@ -84,6 +84,38 @@ async function run() {
 
   global.fetch = origFetch;
 
+  // ---- paginação por cursor em /v2/transactions: segue o campo "next" até achar uma
+  // transação mais antiga que o corte de 90 dias, e para de buscar páginas depois disso ----
+  let txCallCount = 0;
+  const hoje = new Date().toISOString().slice(0, 10);
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/auth')) return Response.json({ apiKey: 'token-fake-123' });
+    if (u.includes('/accounts')) return Response.json({ results: [{ id: 'acc1', name: 'Conta', balance: 100 }] });
+    if (u.includes('/v2/transactions')) {
+      txCallCount++;
+      if (!u.includes('cursor=p2')) {
+        return Response.json({
+          results: [{ id: 't1', date: hoje, description: 'RECENTE', amount: -10, type: 'DEBIT' }],
+          next: 'https://api.pluggy.ai/v2/transactions?accountId=acc1&cursor=p2',
+        });
+      }
+      return Response.json({
+        results: [{ id: 't2', date: '2020-01-01', description: 'MUITO ANTIGA', amount: -20, type: 'DEBIT' }],
+        next: 'https://api.pluggy.ai/v2/transactions?accountId=acc1&cursor=p3',
+      });
+    }
+    throw new Error('URL inesperada: ' + u);
+  };
+  r = await worker.fetch(req('/sync', { headers: { Authorization: 'Bearer abc' } }), {
+    SHARED_TOKEN: 'abc', PLUGGY_CLIENT_ID: 'fake', PLUGGY_CLIENT_SECRET: 'fake', PLUGGY_ITEM_IDS: 'item1',
+  });
+  const pagBody = await r.json();
+  chk('paginação: busca 2 páginas e para ao achar transação antiga', txCallCount === 2);
+  chk('paginação: só mantém a transação dentro dos 90 dias', pagBody.transactions.length === 1 && pagBody.transactions[0].desc === 'RECENTE');
+
+  global.fetch = origFetch;
+
   // ---- /connect-token: rota nova pra reconectar o banco pela NOSSA aplicação ----
   r = await worker.fetch(req('/connect-token'), { SHARED_TOKEN: 'abc' });
   chk('connect-token sem Authorization = 401', r.status === 401);

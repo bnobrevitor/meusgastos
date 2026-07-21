@@ -65,14 +65,34 @@ async function pluggyAuth(clientId, clientSecret) {
   return j.apiKey;
 }
 
-async function pluggyGet(path, apiKey) {
-  const r = await fetch(`${PLUGGY_BASE}${path}`, { headers: { 'X-API-KEY': apiKey } });
+// aceita tanto um path relativo ("/accounts?...") quanto uma URL completa (o campo "next"
+// que a Pluggy devolve pra paginação por cursor em /v2/transactions)
+async function pluggyGet(pathOrUrl, apiKey) {
+  const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${PLUGGY_BASE}${pathOrUrl}`;
+  const r = await fetch(url, { headers: { 'X-API-KEY': apiKey } });
   if (!r.ok) {
     let detail = '';
     try { const j = await r.json(); detail = j.message || j.error || JSON.stringify(j); } catch (e) {}
-    throw new Error('Erro na Pluggy em ' + path + ' (HTTP ' + r.status + ')' + (detail ? ': ' + detail : ''));
+    throw new Error('Erro na Pluggy em ' + pathOrUrl + ' (HTTP ' + r.status + ')' + (detail ? ': ' + detail : ''));
   }
   return r.json();
+}
+
+// /v2/transactions só pagina por cursor (campo "next" na resposta), sem filtro de data na
+// query — então buscamos página a página e paramos assim que a página já trouxer alguma
+// transação mais antiga que o corte (a API devolve as mais recentes primeiro).
+const MAX_TX_PAGES = 10; // até 5.000 transações por conta, bem além do uso pessoal
+async function fetchTransactionsSince(accountId, apiKey, fromDate) {
+  const all = [];
+  let next = `/v2/transactions?accountId=${encodeURIComponent(accountId)}`;
+  for (let page = 0; next && page < MAX_TX_PAGES; page++) {
+    const resp = await pluggyGet(next, apiKey);
+    const txs = resp.results || [];
+    all.push(...txs);
+    if (txs.some(t => String(t.date || '').slice(0, 10) < fromDate)) break;
+    next = resp.next || null;
+  }
+  return all.filter(t => String(t.date || '').slice(0, 10) >= fromDate);
 }
 
 // Gera um Connect Token vinculado à NOSSA aplicação (nosso clientId), pra reconectar o banco
@@ -114,11 +134,7 @@ async function fetchAllBankData(env) {
     const accs = accResp.results || [];
     for (const acc of accs) {
       accounts.push(mapPluggyAccount(acc));
-      const txResp = await pluggyGet(
-        `/transactions?accountId=${encodeURIComponent(acc.id)}&from=${from}`,
-        apiKey
-      );
-      const txs = txResp.results || [];
+      const txs = await fetchTransactionsSince(acc.id, apiKey, from);
       for (const t of txs) transactions.push(mapPluggyTransaction(t));
     }
   }
