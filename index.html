@@ -263,6 +263,7 @@
       <input id="fSearch" placeholder="Buscar..." oninput="renderTx()">
       <button class="btn sm ghost" onclick="openImportDialog('tx')">📥 Importar extrato</button>
       <button class="btn sm ghost" id="btnBankSync" onclick="syncBankData()">🏦 Atualizar do banco</button>
+      <button class="btn sm ghost" onclick="openBankReconcile()">⚖️ Ajustar saldo pra bater com o banco</button>
     </div>
     <div class="panel" id="txList"></div>
   </section>
@@ -710,6 +711,20 @@
     <div class="actions">
       <button type="button" class="btn ghost" onclick="dlgImport.close()">Fechar</button>
       <button type="button" class="btn" id="impCommitBtn" style="display:none" onclick="commitImport()">Importar selecionados</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgBankReconcile">
+  <form method="dialog" style="padding:20px;display:flex;flex-direction:column;gap:12px">
+    <h3>Ajustar saldo pra bater com o banco</h3>
+    <p class="muted" style="font-size:.8rem">Corrige o saldo inicial da conta escolhida pra que o saldo calculado pelo app feche com o valor que o banco informou na última sincronização. Não altera nenhum lançamento já importado.</p>
+    <div><label>Conta no banco (última sincronização)</label><select id="brcBankAcc" onchange="updateBrcPreview()"></select></div>
+    <div><label>Conta no app</label><select id="brcAppAcc" onchange="updateBrcPreview()"></select></div>
+    <p class="muted" id="brcPreview" style="font-size:.85rem"></p>
+    <div class="actions">
+      <button type="button" class="btn ghost" onclick="dlgBankReconcile.close()">Cancelar</button>
+      <button type="button" class="btn" onclick="applyBankReconcile()">Ajustar</button>
     </div>
   </form>
 </dialog>
@@ -2478,6 +2493,7 @@ async function connectBank(){
     alert('Erro ao iniciar a conexão com o banco: '+(e.message||'falha desconhecida'));
   }
 }
+let lastBankAccounts = [];
 async function syncBankData(){
   if(!bankCfg.url || !bankCfg.token){
     alert('Configure a conexão bancária primeiro (⤓ Backup → Conexão bancária em tempo real).');
@@ -2490,6 +2506,7 @@ async function syncBankData(){
     const r = await fetch(bankCfg.url+'/sync', {headers:{Authorization:'Bearer '+bankCfg.token}});
     const j = await r.json();
     if(!r.ok) throw new Error(j.error || ('Erro HTTP '+r.status));
+    lastBankAccounts = j.accounts || [];
     if(!j.transactions || !j.transactions.length){
       alert('Nenhuma transação encontrada nos últimos 90 dias.');
       return;
@@ -2501,6 +2518,38 @@ async function syncBankData(){
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = orig; }
   }
+}
+function openBankReconcile(){
+  if(!lastBankAccounts.length){
+    alert('Sincronize com o banco primeiro (🏦 Atualizar do banco) pra ter um saldo real pra comparar.');
+    return;
+  }
+  if(!db.accounts.length){
+    alert('Cadastre uma conta no app primeiro (aba Contas).');
+    return;
+  }
+  brcBankAcc.innerHTML = lastBankAccounts.map(a=>`<option value="${a.id}">${esc(a.nome)} — ${fmt(a.saldo)}</option>`).join('');
+  fillAccSelect(brcAppAcc);
+  updateBrcPreview();
+  dlgBankReconcile.showModal();
+}
+function updateBrcPreview(){
+  const bankAcc = lastBankAccounts.find(a=>a.id===brcBankAcc.value);
+  const appAcc = db.accounts.find(a=>a.id===brcAppAcc.value);
+  if(!bankAcc || !appAcc){ brcPreview.textContent=''; return; }
+  const atual = accBalance(appAcc);
+  const diff = bankAcc.saldo - atual;
+  brcPreview.textContent = 'Saldo atual no app: '+fmt(atual)+' → vai virar '+fmt(bankAcc.saldo)+' (ajuste de '+fmt(diff)+' no saldo inicial).';
+}
+function applyBankReconcile(){
+  const bankAcc = lastBankAccounts.find(a=>a.id===brcBankAcc.value);
+  const appAcc = db.accounts.find(a=>a.id===brcAppAcc.value);
+  if(!bankAcc || !appAcc) return;
+  const diff = bankAcc.saldo - accBalance(appAcc);
+  appAcc.initial = (appAcc.initial||0) + diff;
+  save(); renderAll();
+  dlgBankReconcile.close();
+  alert('Saldo ajustado — a conta "'+appAcc.name+'" agora fecha em '+fmt(bankAcc.saldo)+'.');
 }
 
 // ===== importação de extrato (OFX / CSV / PDF) =====
