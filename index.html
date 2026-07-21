@@ -718,8 +718,8 @@
 <dialog id="dlgBankReconcile">
   <form method="dialog" style="padding:20px;display:flex;flex-direction:column;gap:12px">
     <h3>Ajustar saldo pra bater com o banco</h3>
-    <p class="muted" style="font-size:.8rem">Corrige o saldo inicial da conta escolhida pra que o saldo calculado pelo app feche com o valor que o banco informou na última sincronização. Não altera nenhum lançamento já importado.</p>
-    <div><label>Conta no banco (última sincronização)</label><select id="brcBankAcc" onchange="updateBrcPreview()"></select></div>
+    <p class="muted" style="font-size:.8rem">Corrige o saldo inicial da conta escolhida pra que o saldo calculado pelo app feche com o valor que o banco informou na última sincronização. Marque uma ou mais contas do banco pra somar (ex.: conta corrente + cartão) contra uma única conta do app. Não altera nenhum lançamento já importado.</p>
+    <div><label>Contas do banco (última sincronização) — some as que quiser juntar</label><div id="brcBankAccs" style="display:flex;flex-direction:column;gap:4px"></div></div>
     <div><label>Conta no app</label><select id="brcAppAcc" onchange="updateBrcPreview()"></select></div>
     <p class="muted" id="brcPreview" style="font-size:.85rem"></p>
     <div class="actions">
@@ -813,6 +813,7 @@ function migrate(d){
   if(!d.settings.fire) d.settings.fire = {income:null, aporte:null, ret:4, swr:4};
   if(!d.sinking) d.sinking = [];
   if(!d.importedTrades) d.importedTrades = []; // registro leve pra detectar reimportação de nota de corretagem
+  if(!d.importedBankTxIds) d.importedBankTxIds = []; // IDs da Pluggy já importados, pra não duplicar em sincronizações repetidas
   if(!d.sinkingPaid) d.sinkingPaid = {};
   if(d.settings.debtExtra===undefined) d.settings.debtExtra = 0;
   if(d.settings.ipcaExp===undefined) d.settings.ipcaExp = 4.5;
@@ -2528,28 +2529,36 @@ function openBankReconcile(){
     alert('Cadastre uma conta no app primeiro (aba Contas).');
     return;
   }
-  brcBankAcc.innerHTML = lastBankAccounts.map(a=>`<option value="${a.id}">${esc(a.nome)} — ${fmt(a.saldo)}</option>`).join('');
+  brcBankAccs.innerHTML = lastBankAccounts.map((a,i)=>
+    `<label class="chk"><input type="checkbox" id="brcBankChk${i}" checked onchange="updateBrcPreview()"> ${esc(a.nome)} — ${fmt(a.saldo)}</label>`
+  ).join('');
   fillAccSelect(brcAppAcc);
   updateBrcPreview();
   dlgBankReconcile.showModal();
 }
+function brcSelectedBankTotal(){
+  return lastBankAccounts.reduce((sum,a,i)=>{
+    const chk = document.getElementById('brcBankChk'+i);
+    return sum + (chk && chk.checked ? a.saldo : 0);
+  }, 0);
+}
 function updateBrcPreview(){
-  const bankAcc = lastBankAccounts.find(a=>a.id===brcBankAcc.value);
   const appAcc = db.accounts.find(a=>a.id===brcAppAcc.value);
-  if(!bankAcc || !appAcc){ brcPreview.textContent=''; return; }
+  const total = brcSelectedBankTotal();
+  if(!appAcc){ brcPreview.textContent=''; return; }
   const atual = accBalance(appAcc);
-  const diff = bankAcc.saldo - atual;
-  brcPreview.textContent = 'Saldo atual no app: '+fmt(atual)+' → vai virar '+fmt(bankAcc.saldo)+' (ajuste de '+fmt(diff)+' no saldo inicial).';
+  const diff = total - atual;
+  brcPreview.textContent = 'Saldo atual no app: '+fmt(atual)+' → vai virar '+fmt(total)+' (ajuste de '+fmt(diff)+' no saldo inicial).';
 }
 function applyBankReconcile(){
-  const bankAcc = lastBankAccounts.find(a=>a.id===brcBankAcc.value);
   const appAcc = db.accounts.find(a=>a.id===brcAppAcc.value);
-  if(!bankAcc || !appAcc) return;
-  const diff = bankAcc.saldo - accBalance(appAcc);
+  if(!appAcc) return;
+  const total = brcSelectedBankTotal();
+  const diff = total - accBalance(appAcc);
   appAcc.initial = (appAcc.initial||0) + diff;
   save(); renderAll();
   dlgBankReconcile.close();
-  alert('Saldo ajustado — a conta "'+appAcc.name+'" agora fecha em '+fmt(bankAcc.saldo)+'.');
+  alert('Saldo ajustado — a conta "'+appAcc.name+'" agora fecha em '+fmt(total)+'.');
 }
 
 // ===== importação de extrato (OFX / CSV / PDF) =====
@@ -2897,16 +2906,20 @@ function applyCsvMapping(){
   startReview(rows);
 }
 function startReview(rows){
+  // linhas vindas da sincronização bancária trazem um pluggyId estável — se já foram
+  // importadas antes (mesmo em outra sincronização), nem mostra de novo na revisão
+  const jaImportadas = rows.filter(r=>r.pluggyId && (db.importedBankTxIds||[]).includes(r.pluggyId)).length;
+  rows = rows.filter(r=>!(r.pluggyId && (db.importedBankTxIds||[]).includes(r.pluggyId)));
   impRows = rows.map(r=>{
     const dup = r.kind==='tx' ? isDuplicateTx(r) : isDuplicateInv(r);
     return {...r, include: !dup, dup, cat: r.kind==='tx' ? guessCategory(r.desc, r.type) : null};
   });
   if(!impRows.length){
-    impFileStatus.textContent = '⚠ Nenhum lançamento reconhecido nesse arquivo.';
+    impFileStatus.textContent = jaImportadas ? `Todos os ${jaImportadas} lançamento(s) já tinham sido importados antes.` : '⚠ Nenhum lançamento reconhecido nesse arquivo.';
     impReview.style.display='none'; impCommitBtn.style.display='none';
     return;
   }
-  impFileStatus.textContent = '';
+  impFileStatus.textContent = jaImportadas ? `${jaImportadas} lançamento(s) já importado(s) antes foram ignorados automaticamente.` : '';
   if(impRows[0].kind==='tx'){ impAccWrap.style.display=''; fillAccSelect(impAcc); }
   else impAccWrap.style.display='none';
   renderImportReview();
@@ -2962,6 +2975,7 @@ function commitImport(){
       const cat = document.getElementById('impCat'+i).value;
       if(!date) return;
       db.transactions.push({id:uid(), type, amount:r.amount, desc, cat, acc, toAcc:null, date});
+      if(r.pluggyId) db.importedBankTxIds.push(r.pluggyId);
       n++;
     });
   } else {
