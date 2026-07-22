@@ -17,7 +17,9 @@
     --shadow:0 1px 3px rgba(16,40,30,.08);
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Plus Jakarta Sans',-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);padding-bottom:90px;-webkit-font-smoothing:antialiased}
+  /* sem padding-bottom aqui: sobrava do design antigo e virava faixa vazia no fim da
+     página (a folga da barra inferior no celular vem do padding do .contentcol main) */
+  body{font-family:'Plus Jakarta Sans',-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
   h1,h2,h3,.brand-name{font-family:'Plus Jakarta Sans',sans-serif}
   .val,.amt{font-family:'IBM Plex Mono',monospace}
   header{position:sticky;top:0;z-index:10;background:var(--card);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
