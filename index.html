@@ -71,6 +71,10 @@
   .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:6px}
   .filters{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
   .filters select,.filters input{width:auto;flex:1;min-width:110px;padding:8px}
+  /* campos dentro de um <div> não são filhos flex: precisam ocupar 100% do wrapper,
+     senão assumem a largura padrão do navegador e estouram o painel no celular */
+  .filters>div{min-width:0}
+  .filters>div input,.filters>div select{width:100%;min-width:0;flex:none}
   .chk{display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer}
   .chk input{width:auto}
   .banner{padding:10px 14px;background:var(--amber-bg);border:1px solid var(--amber);color:#7A5300;border-radius:12px;font-size:.85rem;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
@@ -202,15 +206,23 @@
     .topbrand{display:flex}
     .pageheading{margin:16px 0 14px}
     .pageheading h1{font-size:23px}
-    .contentcol main{padding:0 16px 92px}
+    .contentcol main{padding:0 16px 110px}
     .btn.newtx{display:none}
     .cards4{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
     .grid57,.gridPrev,.gridBudget,.gridInv,.gridNW,.gridPlan,.grid3{grid-template-columns:1fr}
-    .bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:25;justify-content:space-around;padding:9px 6px calc(env(safe-area-inset-bottom,0px) + 9px);background:rgba(255,255,255,.95);backdrop-filter:blur(10px);border-top:1px solid var(--line)}
-    .bottom-nav button{border:none;background:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--dim);font-family:inherit;flex:1;padding:2px}
+    /* cards mais compactos: com 2 colunas em tela estreita, o valor em mono estourava a caixa */
+    .card{padding:16px}
+    .card .val{font-size:1.15rem;letter-spacing:-.3px}
+    .card .lbl{font-size:12px}
+    .card .sub{font-size:11.5px;margin-top:5px}
+    .panel{padding:18px}
+    /* deixa os campos encolherem em vez de vazar do painel */
+    .filters select,.filters input{min-width:0}
+    .bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:25;justify-content:space-around;padding:12px 6px calc(env(safe-area-inset-bottom,0px) + 16px);background:rgba(255,255,255,.95);backdrop-filter:blur(10px);border-top:1px solid var(--line)}
+    .bottom-nav button{border:none;background:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--dim);font-family:inherit;flex:1;padding:2px}
     .bottom-nav button.on{color:var(--green)}
-    .bottom-nav span{font-size:10px;font-weight:700}
-    .fab{bottom:78px}
+    .bottom-nav span{font-size:11px;font-weight:700}
+    .fab{bottom:96px}
   }
 </style>
 </head>
@@ -844,6 +856,7 @@
     <p class="muted" id="cloudStatus" style="font-size:.8rem"></p>
     <div id="cloudSetup" style="display:flex;flex-direction:column;gap:8px">
       <input id="ghTok" placeholder="Cole seu token do GitHub (escopo gist)">
+      <input id="cloudPass" type="password" placeholder="Senha de criptografia (recomendado — só você sabe)">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button type="button" class="btn sm" onclick="cloudCreate()">Criar sincronização nova</button>
       </div>
@@ -854,9 +867,10 @@
     </div>
     <div id="cloudConnected" style="display:none;gap:8px;flex-wrap:wrap">
       <button type="button" class="btn sm" onclick="cloudSyncNow()">Sincronizar agora</button>
+      <button type="button" class="btn sm ghost" id="btnCloudEnc" onclick="cloudSetPassphrase()">🔒 Ativar criptografia</button>
       <button type="button" class="btn sm danger" onclick="cloudDisconnect()">Desconectar</button>
     </div>
-    <p class="muted" style="font-size:.75rem">1) Crie um token grátis <a href="https://github.com/settings/tokens/new?scopes=gist&amp;description=Meus+Gastos" target="_blank" rel="noopener">clicando aqui</a> (marque só o escopo "gist") e cole acima. 2) Clique em "Criar sincronização nova" — vai aparecer um <b>ID de sincronização</b>: copie e cole nesse mesmo campo no seu celular, junto com um token (pode ser o mesmo), e clique em "Conectar".</p>
+    <p class="muted" style="font-size:.75rem">1) Crie um token grátis <a href="https://github.com/settings/tokens/new?scopes=gist&amp;description=Meus+Gastos" target="_blank" rel="noopener">clicando aqui</a> (marque só o escopo "gist") e cole acima. 2) Clique em "Criar sincronização nova" — vai aparecer um <b>ID de sincronização</b>: copie e cole nesse mesmo campo no seu celular, junto com um token (pode ser o mesmo) <b>e a mesma senha de criptografia</b>, e clique em "Conectar". A senha cifra os dados antes de subirem — se você já tinha sincronização sem senha, use o botão "🔒 Ativar criptografia" abaixo pra adicionar depois, sem perder o pareamento.</p>
     <hr style="border:none;border-top:1px solid var(--line)">
     <b style="font-size:.9rem">Conexão bancária em tempo real (Open Finance)</b>
     <p class="muted" id="bankStatus" style="font-size:.8rem"></p>
@@ -2951,6 +2965,33 @@ let cloudTimer = null, cloudBusy = false;
 function saveCloudCfg(){ localStorage.setItem(CLOUD_KEY, JSON.stringify(cloudCfg)); }
 function ghHeaders(){ return {Authorization:'token '+cloudCfg.token, Accept:'application/vnd.github+json'}; }
 
+// ===== criptografia ponta-a-ponta do conteúdo sincronizado (AES-256-GCM + PBKDF2) =====
+// a senha nunca sai do aparelho (fica só em cloudCfg, localStorage local) — o GitHub só
+// vê um blob cifrado. Sem a senha, ninguém (nem o GitHub, nem quem achar o link do Gist) lê os dados.
+function bufToB64(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))); }
+function b64ToBuf(b64){ return Uint8Array.from(atob(b64), c=>c.charCodeAt(0)); }
+async function cloudDeriveKey(passphrase, saltB64){
+  const salt = saltB64 ? b64ToBuf(saltB64) : crypto.getRandomValues(new Uint8Array(16));
+  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt, iterations:150000, hash:'SHA-256'},
+    material, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']
+  );
+  return {key, salt};
+}
+async function cloudEncrypt(obj, passphrase){
+  const {key, salt} = await cloudDeriveKey(passphrase);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const cipher = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, new TextEncoder().encode(JSON.stringify(obj)));
+  return JSON.stringify({enc:1, salt:bufToB64(salt), iv:bufToB64(iv), data:bufToB64(cipher)});
+}
+async function cloudDecrypt(content, passphrase){
+  const wrap = JSON.parse(content);
+  const {key} = await cloudDeriveKey(passphrase, wrap.salt);
+  const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv:b64ToBuf(wrap.iv)}, key, b64ToBuf(wrap.data));
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
 async function cloudPull(){
   const r = await fetch('https://api.github.com/gists/'+cloudCfg.gistId, {headers: ghHeaders()});
   if(r.status===401) throw new Error('Token inválido ou sem permissão.');
@@ -2959,16 +3000,40 @@ async function cloudPull(){
   const j = await r.json();
   const f = j.files && j.files[CLOUD_FILE];
   if(!f) throw new Error('Sincronização existe mas está vazia/corrompida.');
-  const d = JSON.parse(f.content);
+  let parsed; try{ parsed = JSON.parse(f.content); }catch(e){ throw new Error('Conteúdo da sincronização inválido.'); }
+  let d;
+  if(parsed && parsed.enc===1){
+    if(!cloudCfg.pass){
+      const p = prompt('Essa sincronização é criptografada. Digite a senha (a mesma definida no outro aparelho):');
+      if(!p) throw new Error('Senha necessária para ler os dados sincronizados (criptografados).');
+      cloudCfg.pass = p; saveCloudCfg();
+    }
+    try{ d = await cloudDecrypt(f.content, cloudCfg.pass); }
+    catch(e){ cloudCfg.pass = null; saveCloudCfg(); throw new Error('Senha incorreta — não foi possível decifrar os dados sincronizados.'); }
+  } else {
+    d = parsed;
+  }
   if(!d || !d.accounts) throw new Error('Conteúdo da sincronização inválido.');
   return d;
 }
 async function cloudPush(){
+  const content = cloudCfg.pass ? await cloudEncrypt(db, cloudCfg.pass) : JSON.stringify(db);
   const r = await fetch('https://api.github.com/gists/'+cloudCfg.gistId, {
     method:'PATCH', headers: {...ghHeaders(), 'Content-Type':'application/json'},
-    body: JSON.stringify({files:{[CLOUD_FILE]:{content: JSON.stringify(db)}}})
+    body: JSON.stringify({files:{[CLOUD_FILE]:{content}}})
   });
   if(!r.ok) throw new Error('Erro '+r.status+' ao enviar dados para a nuvem.');
+}
+async function cloudSetPassphrase(){
+  const p = prompt('Crie uma senha de criptografia (guarde bem — sem ela, ninguém recupera os dados, nem você nem eu):');
+  if(!p) return;
+  cloudCfg.pass = p; saveCloudCfg();
+  cloudStatus.textContent = 'Ativando criptografia...';
+  try{
+    await cloudPush();
+    renderCloudUI();
+    cloudStatus.textContent = '✓ Criptografia ativada e sincronizada. No outro aparelho, na próxima sincronização, ele vai pedir essa mesma senha.';
+  }catch(e){ cloudStatus.textContent = '⚠ '+e.message; }
 }
 function cloudSyncSoon(){
   if(!cloudCfg.token || !cloudCfg.gistId) return;
@@ -2999,28 +3064,31 @@ async function cloudSyncNow(silent){
 }
 async function cloudCreate(){
   const tok = ghTok.value.trim();
+  const pass = (document.getElementById('cloudPass').value||'').trim();
   if(!tok){ cloudStatus.textContent = 'Cole seu token do GitHub primeiro.'; return; }
   cloudStatus.textContent = 'Criando sincronização...';
   try{
+    const content = pass ? await cloudEncrypt(db, pass) : JSON.stringify(db);
     const r = await fetch('https://api.github.com/gists', {
       method:'POST', headers: {Authorization:'token '+tok, Accept:'application/vnd.github+json', 'Content-Type':'application/json'},
-      body: JSON.stringify({description:'Saldo — dados (privado)', public:false, files:{[CLOUD_FILE]:{content: JSON.stringify(db)}}})
+      body: JSON.stringify({description:'Saldo — dados (privado)', public:false, files:{[CLOUD_FILE]:{content}}})
     });
     if(r.status===401) throw new Error('Token inválido — confira se copiou certo e marcou o escopo "gist".');
     if(!r.ok) throw new Error('Erro '+r.status+' ao criar a sincronização.');
     const j = await r.json();
-    cloudCfg = {token:tok, gistId:j.id, lastSync:new Date().toISOString()};
+    cloudCfg = {token:tok, gistId:j.id, pass: pass||undefined, lastSync:new Date().toISOString()};
     saveCloudCfg();
     renderCloudUI();
-    cloudStatus.textContent = '✓ Criado! ID de sincronização: '+j.id+' — cole esse ID (e um token) no seu celular para conectar.';
+    cloudStatus.textContent = (pass ? '✓ Criado com criptografia! ' : '✓ Criado (sem criptografia). ')+'ID de sincronização: '+j.id+' — cole esse ID (e um token'+(pass?' + a mesma senha':'')+') no seu celular para conectar.';
   }catch(e){ cloudStatus.textContent = '⚠ '+e.message; }
 }
 async function cloudJoin(){
   const tok = ghTok.value.trim(), gid = ghGistId.value.trim();
+  const pass = (document.getElementById('cloudPass').value||'').trim();
   if(!tok || !gid){ cloudStatus.textContent = 'Cole o token e o ID de sincronização.'; return; }
   cloudStatus.textContent = 'Conectando...';
   const prevCfg = cloudCfg;
-  cloudCfg = {token:tok, gistId:gid};
+  cloudCfg = {token:tok, gistId:gid, pass: pass||undefined};
   try{
     const remote = await cloudPull();
     if(db.transactions.length && !confirm('Substituir os dados deste aparelho pelos da sincronização conectada?')){
@@ -3044,8 +3112,9 @@ function renderCloudUI(){
   const connected = !!(cloudCfg.token && cloudCfg.gistId);
   cloudSetup.style.display = connected ? 'none' : '';
   cloudConnected.style.display = connected ? 'flex' : 'none';
+  if(document.getElementById('btnCloudEnc')) btnCloudEnc.style.display = (connected && !cloudCfg.pass) ? '' : 'none';
   if(connected && !cloudBusy){
-    cloudStatus.textContent = '✓ Conectado (ID: '+cloudCfg.gistId+')'+
+    cloudStatus.textContent = '✓ Conectado (ID: '+cloudCfg.gistId+')'+(cloudCfg.pass?' · 🔒 criptografado':' · ⚠ sem criptografia')+
       (cloudCfg.lastSync ? ' — última sincronização às '+new Date(cloudCfg.lastSync).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '');
   }
 }
