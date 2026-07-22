@@ -923,7 +923,7 @@
 <script>
 'use strict';
 // ===== dados =====
-const CATS_D = ['Alimentação','Mercado','Transporte','Moradia','Contas (luz/água/net)','Saúde','Lazer','Educação','Assinaturas','Roupas','Outros'];
+const CATS_D = ['Alimentação','Delivery','Mercado','Transporte','Moradia','Contas (luz/água/net)','Saúde','Lazer','Educação','Assinaturas','Roupas','Outros'];
 const CATS_R = ['Salário','Freelance','Investimentos','Presente','Outros'];
 const PALETTE = ['#2A3EFF','#1E9E6B','#F2A429','#FF5B39','#7C6FEF','#0EA5C7','#E85D9E','#7BB83A','#E2751F','#8A8A78','#B25AC7'];
 const KEY = 'gastosApp';
@@ -3508,8 +3508,11 @@ async function parsePDF(file, kind){
 
 // --- categorização por palavra-chave: só um chute inicial, sempre editável na revisão ---
 const CATEGORY_KEYWORDS = [
+  // Delivery vem primeiro: "UBER EATS" também casa com a regra de Transporte ("UBER"),
+  // e aqui vale a primeira que casar
+  [/IFOOD|\bI ?FOOD\b|RAPPI|UBER ?EATS|JAMES DELIVERY|AIQFOME|ZE DELIVERY|DELIVERY/i, 'Delivery'],
   [/UBER|99APP|99POP|\bTAXI\b|POSTO |COMBUSTIVEL|GASOLINA|ESTACIONAMENTO|PEDAGIO|\bMETRO\b|ONIBUS|BILHETE UNICO/i, 'Transporte'],
-  [/IFOOD|RAPPI|RESTAURANTE|LANCHONETE|PADARIA|PIZZARIA|\bBAR\b/i, 'Alimentação'],
+  [/RESTAURANTE|LANCHONETE|PADARIA|PIZZARIA|\bBAR\b/i, 'Alimentação'],
   [/MERCADO|SUPERMERCADO|ATACAD|HORTIFRUTI|CARREFOUR|\bEXTRA\b|PAO DE ACUCAR|ASSAI/i, 'Mercado'],
   [/ALUGUEL|CONDOMINIO|IMOBILIARIA/i, 'Moradia'],
   [/\bENEL\b|\bCPFL\b|\bLIGHT\b|SABESP|COPASA|\bVIVO\b|\bCLARO\b|\bTIM\b|\bOI\b|\bNET\b|INTERNET|ENERGIA|\bAGUA\b/i, 'Contas (luz/água/net)'],
@@ -3892,11 +3895,13 @@ function renderDash(){
 }
 
 function renderTx(){
+  // lê a seleção ANTES de reconstruir os <option>: montar o innerHTML zera o value,
+  // então guardar depois descartava justamente a categoria que o usuário acabou de escolher
+  const prevCat = fCat.value, prevAcc = fAcc.value;
   fillCatSelect(fCat, [...CATS_D,...CATS_R,'Transferência'], true);
   fillAccSelect(fAcc, true);
-  if(renderTx.c!==undefined) fCat.value = renderTx.c;
-  if(renderTx.a!==undefined) fAcc.value = renderTx.a;
-  renderTx.c = fCat.value; renderTx.a = fAcc.value;
+  if([...fCat.options].some(o=>o.value===prevCat)) fCat.value = prevCat;
+  if([...fAcc.options].some(o=>o.value===prevAcc)) fAcc.value = prevAcc;
 
   const q = (fSearch.value||'').toLowerCase();
   let list = monthTx(viewYM);
