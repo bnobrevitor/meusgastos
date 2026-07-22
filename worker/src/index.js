@@ -144,7 +144,7 @@ async function fetchAllBankData(env) {
 // ===== agente financeiro (Gemini) — chave nunca sai daqui =====
 // google_search: grounding nativo da API do Gemini, usado pela skill carteira-radar
 // pra buscar carteiras recomendadas/cotações atuais em vez de responder de memória.
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-3-flash-preview';
 async function callGemini(system, question, apiKey) {
   const r = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`,
