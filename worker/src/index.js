@@ -141,32 +141,33 @@ async function fetchAllBankData(env) {
   return { accounts, transactions };
 }
 
-// ===== agente financeiro (Gemini) — chave nunca sai daqui =====
-// google_search: grounding nativo da API do Gemini, usado pela skill carteira-radar
-// pra buscar carteiras recomendadas/cotações atuais em vez de responder de memória.
-const GEMINI_MODEL = 'gemini-3-flash-preview';
-async function callGemini(system, question, apiKey) {
-  const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system || '' }] },
-        contents: [{ role: 'user', parts: [{ text: question || '' }] }],
-        tools: [{ google_search: {} }],
-      }),
-    }
-  );
+// ===== agente financeiro (Claude Haiku 4.5) — chave nunca sai daqui =====
+// custo pequeno por pergunta (~US$ 0,0025) — trocado do Gemini porque o tier gratuito
+// não liberava cota pra essa conta/projeto, algo fora do nosso controle.
+const CLAUDE_MODEL = 'claude-haiku-4-5';
+async function callClaude(system, question, apiKey) {
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 1024,
+      system: system || '',
+      messages: [{ role: 'user', content: question || '' }],
+    }),
+  });
   if (!r.ok) {
     let detail = '';
     try { const j = await r.json(); detail = (j.error && j.error.message) || JSON.stringify(j); } catch (e) {}
-    throw new Error('Erro na Gemini (HTTP ' + r.status + ')' + (detail ? ': ' + detail : ''));
+    throw new Error('Erro na Claude (HTTP ' + r.status + ')' + (detail ? ': ' + detail : ''));
   }
   const j = await r.json();
-  const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
-  const text = parts.map(p => p.text || '').join('');
-  if (!text) throw new Error('Gemini não retornou texto (possível bloqueio de segurança)');
+  const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  if (!text) throw new Error('Claude não retornou texto (possível recusa por segurança)');
   return text;
 }
 
@@ -190,12 +191,12 @@ async function handleRequest(request, env) {
     if (!isAuthorized(request, env.SHARED_TOKEN)) {
       return json({ error: 'não autorizado — token ausente ou incorreto' }, 401);
     }
-    if (!env.GEMINI_API_KEY) {
-      return json({ error: 'Worker sem GEMINI_API_KEY configurada (secret ausente)' }, 500);
+    if (!env.ANTHROPIC_API_KEY) {
+      return json({ error: 'Worker sem ANTHROPIC_API_KEY configurada (secret ausente)' }, 500);
     }
     try {
       const body = await request.json();
-      const text = await callGemini(body.system, body.question, env.GEMINI_API_KEY);
+      const text = await callClaude(body.system, body.question, env.ANTHROPIC_API_KEY);
       return json({ text });
     } catch (e) {
       return json({ error: e.message || 'erro desconhecido ao chamar a IA' }, 502);

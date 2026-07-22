@@ -510,10 +510,10 @@
         <details style="margin-top:12px">
           <summary class="muted" style="font-size:.78rem;cursor:pointer">Configurar IA generativa (opcional)</summary>
           <div class="filters" style="margin-top:10px;margin-bottom:0">
-            <label class="chk"><input type="checkbox" id="aiEnabled" onchange="aiSaveCfg()"> IA generativa (Gemini, via seu Worker)</label>
+            <label class="chk"><input type="checkbox" id="aiEnabled" onchange="aiSaveCfg()"> IA generativa (Claude Haiku 4.5, via seu Worker)</label>
             <button class="btn sm ghost" onclick="aiTestConn()">Testar conexão</button>
           </div>
-          <p class="muted" style="font-size:.72rem;margin-top:8px" id="aiHelpText">Sem IA ligada, as respostas são calculadas por regras a partir dos seus dados (sem custo, funciona para perguntas diretas). Com a IA ligada, o Coach passa a responder perguntas abertas de verdade — a chamada vai pro seu Worker do Cloudflare (o mesmo da conexão bancária, configurado em Backup → Conexão bancária), que fala com a API gratuita do Google Gemini. A chave nunca fica no navegador. Custo: zero (tier gratuito do Gemini). Funciona de qualquer lugar, sem precisar de PC ligado ou Tailscale.</p>
+          <p class="muted" style="font-size:.72rem;margin-top:8px" id="aiHelpText">Sem IA ligada, as respostas são calculadas por regras a partir dos seus dados (sem custo, funciona para perguntas diretas). Com a IA ligada, o Coach passa a responder perguntas abertas de verdade — a chamada vai pro seu Worker do Cloudflare (o mesmo da conexão bancária, configurado em Backup → Conexão bancária), que fala com a API da Anthropic (Claude Haiku 4.5). A chave nunca fica no navegador. Custo: bem pequeno (~US$ 0,0025 por pergunta). Funciona de qualquer lugar, sem precisar de PC ligado ou Tailscale.</p>
         </details>
       </div>
 
@@ -1294,9 +1294,9 @@ function agentUpdateMsg(id, html){
   const log = document.getElementById('agentChatLog'); if(log) log.scrollTop = log.scrollHeight;
 }
 
-// ===== IA generativa via Gemini, atrás do seu Worker (Cloudflare) — sem custo (tier gratuito) =====
+// ===== IA generativa via Claude Haiku 4.5, atrás do seu Worker (Cloudflare) — custo pequeno por pergunta =====
 // reaproveita a mesma conexão (URL + token) já usada pra sincronização bancária (bankCfg),
-// já que é o mesmo Worker — só um endpoint novo, /agent, que fala com a API do Gemini.
+// já que é o mesmo Worker — só um endpoint novo, /agent, que fala com a API da Anthropic.
 function aiCfg(){
   if(!db.settings.ai) db.settings.ai = {enabled:false};
   return db.settings.ai;
@@ -1330,9 +1330,9 @@ async function aiTestConn(){
     });
     const j = await r.json();
     if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
-    aiStatus.textContent = '✓ Conectado — Gemini respondeu certinho.';
+    aiStatus.textContent = '✓ Conectado — Claude respondeu certinho.';
   }catch(e){
-    aiStatus.textContent = '⚠ Erro: '+(e.message||'falha desconhecida')+'. Confira se o secret GEMINI_API_KEY está configurado no Worker.';
+    aiStatus.textContent = '⚠ Erro: '+(e.message||'falha desconhecida')+'. Confira se o secret ANTHROPIC_API_KEY está configurado no Worker.';
   }
 }
 const DISCLAIMER_CARTEIRA = 'As informações acima são um consolidado de dados públicos (recomendações de terceiros e cotações) e um espelho da carteira informada, apresentados apenas para organização e consulta. Não constituem recomendação, oferta ou aconselhamento de investimento. Recomendações de terceiros refletem premissas e horizontes de cada casa e mudam com frequência — confira sempre a data e o relatório original. Cotações podem ter atraso. Nenhuma decisão de investimento deve ser tomada apenas com base neste painel. Para orientação adequada ao seu perfil, objetivo e patrimônio, consulte um assessor ou consultor de investimentos registrado na CVM.';
@@ -1479,7 +1479,7 @@ async function callCloudAgent(question){
   });
   const j = await res.json().catch(()=>({}));
   if(!res.ok) throw new Error(j.error || ('HTTP '+res.status));
-  if(!j.text) throw new Error('resposta inesperada do Worker/Gemini');
+  if(!j.text) throw new Error('resposta inesperada do Worker/Claude');
   return j.text;
 }
 function agentNeedsDisclaimer(question){
