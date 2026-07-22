@@ -69,7 +69,8 @@
   .seg button.on.transf{background:var(--card2);color:var(--blue);font-weight:700}
   .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:6px}
-  .filters{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+  /* alinha pela base: rótulos que quebram em 2 linhas não desencontram os campos */
+  .filters{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:flex-end}
   .filters select,.filters input{width:auto;flex:1;min-width:110px;padding:8px}
   /* campos dentro de um <div> não são filhos flex: precisam ocupar 100% do wrapper,
      senão assumem a largura padrão do navegador e estouram o painel no celular */
@@ -216,8 +217,11 @@
     .card .lbl{font-size:12px}
     .card .sub{font-size:11.5px;margin-top:5px}
     .panel{padding:18px}
-    /* deixa os campos encolherem em vez de vazar do painel */
-    .filters select,.filters input{min-width:0}
+    /* cards dentro de painéis (reserva, FIRE...) em 1 coluna: valores longos como
+       "R$ 1.798.895,00" não cabem em meia tela, e rótulos de 2 linhas desalinhavam */
+    .panel .cards:not(.cards4){grid-template-columns:1fr}
+    /* no máximo 2 campos por linha — com 4 numa linha só eles ficavam espremidos */
+    .filters>div,.filters>input,.filters>select{min-width:calc(50% - 4px)}
     .bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:25;justify-content:space-around;padding:12px 6px calc(env(safe-area-inset-bottom,0px) + 16px);background:rgba(255,255,255,.95);backdrop-filter:blur(10px);border-top:1px solid var(--line)}
     .bottom-nav button{border:none;background:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--dim);font-family:inherit;flex:1;padding:2px}
     .bottom-nav button.on{color:var(--green)}
