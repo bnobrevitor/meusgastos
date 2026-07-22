@@ -508,14 +508,12 @@
           <button class="coach-send" onclick="agentAsk()" title="Perguntar"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"></path></svg></button>
         </div>
         <details style="margin-top:12px">
-          <summary class="muted" style="font-size:.78rem;cursor:pointer">Configurar IA local (opcional)</summary>
+          <summary class="muted" style="font-size:.78rem;cursor:pointer">Configurar IA generativa (opcional)</summary>
           <div class="filters" style="margin-top:10px;margin-bottom:0">
-            <label class="chk"><input type="checkbox" id="aiEnabled" onchange="aiSaveCfg()"> IA generativa local (Ollama)</label>
-            <input id="aiUrl" placeholder="http://localhost:11434" style="max-width:200px" onchange="aiSaveCfg()">
-            <input id="aiModel" placeholder="llama3.2" style="max-width:120px" onchange="aiSaveCfg()">
+            <label class="chk"><input type="checkbox" id="aiEnabled" onchange="aiSaveCfg()"> IA generativa (Gemini, via seu Worker)</label>
             <button class="btn sm ghost" onclick="aiTestConn()">Testar conexão</button>
           </div>
-          <p class="muted" style="font-size:.72rem;margin-top:8px">Sem IA local ligada, as respostas são calculadas por regras a partir dos seus dados (sem custo, funciona para perguntas diretas). Com o Ollama rodando no seu computador (grátis, <a href="https://ollama.com" target="_blank" rel="noopener noreferrer">ollama.com</a>), o agente passa a responder perguntas abertas com um modelo de verdade — tudo roda na sua máquina, nada é enviado para fora. No celular, use na URL o endereço <b>Tailscale</b> do computador (ex.: <code>http://SEU-PC.ts.net:11434</code>) em vez de <code>localhost</code> — assim funciona de qualquer lugar, sem expor o Ollama na internet pública.</p>
+          <p class="muted" style="font-size:.72rem;margin-top:8px" id="aiHelpText">Sem IA ligada, as respostas são calculadas por regras a partir dos seus dados (sem custo, funciona para perguntas diretas). Com a IA ligada, o Coach passa a responder perguntas abertas de verdade — a chamada vai pro seu Worker do Cloudflare (o mesmo da conexão bancária, configurado em Backup → Conexão bancária), que fala com a API gratuita do Google Gemini. A chave nunca fica no navegador. Custo: zero (tier gratuito do Gemini). Funciona de qualquer lugar, sem precisar de PC ligado ou Tailscale.</p>
         </details>
       </div>
 
@@ -1296,39 +1294,63 @@ function agentUpdateMsg(id, html){
   const log = document.getElementById('agentChatLog'); if(log) log.scrollTop = log.scrollHeight;
 }
 
-// ===== IA generativa local via Ollama (opcional) — roda 100% na máquina do usuário, sem custo =====
+// ===== IA generativa via Gemini, atrás do seu Worker (Cloudflare) — sem custo (tier gratuito) =====
+// reaproveita a mesma conexão (URL + token) já usada pra sincronização bancária (bankCfg),
+// já que é o mesmo Worker — só um endpoint novo, /agent, que fala com a API do Gemini.
 function aiCfg(){
-  if(!db.settings.ai) db.settings.ai = {enabled:false, url:'http://localhost:11434', model:'llama3.2'};
+  if(!db.settings.ai) db.settings.ai = {enabled:false};
   return db.settings.ai;
 }
 function renderAiCfg(){
   const cfg = aiCfg();
   aiEnabled.checked = !!cfg.enabled;
-  if(document.activeElement!==aiUrl) aiUrl.value = cfg.url;
-  if(document.activeElement!==aiModel) aiModel.value = cfg.model;
+  const help = document.getElementById('aiHelpText');
+  if(help && cfg.enabled && !(bankCfg.url && bankCfg.token)){
+    aiStatus.textContent = '⚠ Configure a conexão bancária primeiro (Backup → Conexão bancária em tempo real) — o agente usa o mesmo Worker.';
+  }
 }
 function aiSaveCfg(){
   const cfg = aiCfg();
   cfg.enabled = aiEnabled.checked;
-  cfg.url = aiUrl.value.trim() || 'http://localhost:11434';
-  cfg.model = aiModel.value.trim() || 'llama3.2';
   save();
   aiStatus.textContent = '';
+  renderAiCfg();
 }
 async function aiTestConn(){
-  const cfg = aiCfg();
-  aiStatus.textContent = 'Testando conexão com '+cfg.url+'...';
+  if(!bankCfg.url || !bankCfg.token){
+    aiStatus.textContent = '⚠ Configure a conexão bancária primeiro (Backup → Conexão bancária em tempo real) — o agente usa o mesmo Worker.';
+    return;
+  }
+  aiStatus.textContent = 'Testando conexão com '+bankCfg.url+'/agent ...';
   try{
-    const res = await fetch(cfg.url.replace(/\/$/,'')+'/api/tags');
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    const data = await res.json();
-    const has = (data.models||[]).some(m=>m.name===cfg.model || m.name.startsWith(cfg.model+':'));
-    aiStatus.textContent = has ? '✓ Conectado — modelo "'+cfg.model+'" disponível.' : '⚠ Conectado, mas não achei o modelo "'+cfg.model+'". Rode: ollama pull '+cfg.model;
+    const r = await fetch(bankCfg.url+'/agent', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+bankCfg.token},
+      body: JSON.stringify({system:'Responda só "ok".', question:'diga ok'})
+    });
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+    aiStatus.textContent = '✓ Conectado — Gemini respondeu certinho.';
   }catch(e){
-    aiStatus.textContent = '⚠ Não consegui conectar em '+cfg.url+'. O Ollama está rodando? (comando: ollama serve)';
+    aiStatus.textContent = '⚠ Erro: '+(e.message||'falha desconhecida')+'. Confira se o secret GEMINI_API_KEY está configurado no Worker.';
   }
 }
-const AGENT_SYSTEM_PROMPT = 'Você é um agente financeiro pessoal que roda localmente no computador do usuário. Responda sempre em português, de forma direta e objetiva (poucas frases, a menos que peçam mais detalhe).\n'
+const DISCLAIMER_CARTEIRA = 'As informações acima são um consolidado de dados públicos (recomendações de terceiros e cotações) e um espelho da carteira informada, apresentados apenas para organização e consulta. Não constituem recomendação, oferta ou aconselhamento de investimento. Recomendações de terceiros refletem premissas e horizontes de cada casa e mudam com frequência — confira sempre a data e o relatório original. Cotações podem ter atraso. Nenhuma decisão de investimento deve ser tomada apenas com base neste painel. Para orientação adequada ao seu perfil, objetivo e patrimônio, consulte um assessor ou consultor de investimentos registrado na CVM.';
+const SETOR_MAP = {
+  ITUB4:'Bancos', ITUB3:'Bancos', BBDC4:'Bancos', BBDC3:'Bancos', BBAS3:'Bancos', SANB11:'Bancos', BPAC11:'Bancos', B3SA3:'Bancos', ROXO34:'Bancos',
+  BBSE3:'Seguros', CXSE3:'Seguros', PSSA3:'Seguros', IRBR3:'Seguros',
+  PETR4:'Petróleo e gás', PETR3:'Petróleo e gás', PRIO3:'Petróleo e gás', VBBR3:'Petróleo e gás', UGPA3:'Petróleo e gás', RECV3:'Petróleo e gás', CSAN3:'Petróleo e gás',
+  VALE3:'Mineração e siderurgia', CSNA3:'Mineração e siderurgia', GGBR4:'Mineração e siderurgia', USIM5:'Mineração e siderurgia', CMIN3:'Mineração e siderurgia',
+  ELET3:'Energia e saneamento', ELET6:'Energia e saneamento', EQTL3:'Energia e saneamento', CPLE3:'Energia e saneamento', CPLE6:'Energia e saneamento', ENEV3:'Energia e saneamento', EGIE3:'Energia e saneamento', SBSP3:'Energia e saneamento', CSMG3:'Energia e saneamento', TAEE11:'Energia e saneamento', AXIA3:'Energia e saneamento',
+  ABEV3:'Consumo e varejo', MGLU3:'Consumo e varejo', LREN3:'Consumo e varejo', ASAI3:'Consumo e varejo', CRFB3:'Consumo e varejo', NTCO3:'Consumo e varejo', PCAR3:'Consumo e varejo', CEAB3:'Consumo e varejo', CURY3:'Consumo e varejo', SMFT3:'Consumo e varejo',
+  RADL3:'Saúde', HAPV3:'Saúde', FLRY3:'Saúde', RDOR3:'Saúde', PGMN3:'Saúde',
+  EMBR3:'Indústria e transporte', EMBJ3:'Indústria e transporte', WEGE3:'Indústria e transporte', RENT3:'Indústria e transporte', POMO4:'Indústria e transporte', MOTV3:'Indústria e transporte', RAIL3:'Indústria e transporte', AZUL4:'Indústria e transporte', LEVE3:'Indústria e transporte',
+  SUZB3:'Papel e celulose', KLBN11:'Papel e celulose', DXCO3:'Papel e celulose',
+  MULT3:'Imobiliário', JHSF3:'Imobiliário', TEND3:'Imobiliário', CYRE3:'Imobiliário',
+  TOTS3:'Tecnologia e telecom', VIVT3:'Tecnologia e telecom', BMOB3:'Tecnologia e telecom', LWSA3:'Tecnologia e telecom',
+  TTEN3:'Agro', SLCE3:'Agro', SMTO3:'Agro', ORVR3:'Agro',
+};
+const AGENT_SYSTEM_PROMPT = 'Você é um agente financeiro pessoal. Responda sempre em português, de forma direta e objetiva (poucas frases, a menos que peçam mais detalhe).\n'
   + 'Regras obrigatórias:\n'
   + '- Baseie-se SOMENTE nos dados fornecidos abaixo (números reais do usuário). Nunca invente valores nem estime dados que não foram dados.\n'
   + '- Separe sempre fato (o que já aconteceu, lançado pelo usuário) de projeção/estimativa, e deixe explícitas as suposições quando projetar algo.\n'
@@ -1336,6 +1358,10 @@ const AGENT_SYSTEM_PROMPT = 'Você é um agente financeiro pessoal que roda loca
   + '- O único limite: NUNCA diga se ele deve comprar, vender, aumentar ou reduzir posição em um ativo (existente ou novo), nem dê timing de mercado ou "veredito" de bom/mau investimento. Se perguntarem isso especificamente, recuse só essa parte (uma frase, sem ser seco: diga que não é consultor licenciado) e IMEDIATAMENTE continue com a análise descritiva que você pode fazer sobre esse mesmo ativo. Nunca responda só "não posso ajudar com isso" sem mais nada.\n'
   + '- Pode haver duas seções de cotação da B3: uma com ativos que o usuário JÁ POSSUI e outra de "mercado/comparação" (inclui o Ibovespa ^BVSP e qualquer ativo que ele mencionou na pergunta mas não possui). Use SÓ os números dessas seções para falar de preço/variação — nunca invente variação de um mês que não está listado; se faltar o dado, diga que não tem em vez de estimar.\n'
   + '- Quando o usuário pedir para comparar a rentabilidade de um ativo com "concorrentes", "o mercado", o Ibovespa ou outro papel específico, isso é análise comparativa permitida (não é recomendação) — compare os números reais das duas seções livremente, deixando claro quais ativos são da carteira do usuário e quais são só para comparação.\n'
+  + '- Você tem acesso a busca no Google. Quando o usuário perguntar o que bancos/corretoras estão recomendando, pedir um consolidado de carteiras recomendadas, ranking de ações mais indicadas, ou o "consenso do mercado", BUSQUE informação atual (mês corrente) em vez de responder de memória — nunca invente que uma corretora recomendou algo. Cite as casas de análise e a data do levantamento. Se a busca não trouxer dado do mês atual, diga isso claramente e mostre o mais recente encontrado, com a data.\n'
+  + '- Ao reportar concentração (por ativo ou por setor), seja só descritivo e neutro: "X% da carteira está em Y". NUNCA diga se é "demais" ou "de menos", nem sugira rebalancear. Se perguntarem se é concentração excessiva, explique que depende do perfil e objetivo da pessoa, dê referências gerais de diversificação de forma educativa, e sugira um assessor/consultor de investimentos registrado na CVM para um julgamento sobre o caso dela.\n'
+  + '- Se o usuário pedir explicitamente "me diga o que comprar", "monte minha carteira ideal" ou "devo vender X?", recuse essa parte com gentileza (você não é consultor licenciado) e ofereça em vez disso mostrar o consenso do mercado e/ou a situação atual da carteira dela.\n'
+  + '- Sempre que a resposta apresentar um painel de recomendações de mercado (consolidado de corretoras) ou uma análise completa da carteira com concentração, termine com este aviso, reproduzido na íntegra: "'+DISCLAIMER_CARTEIRA+'"\n'
   + '- Se a pergunta não tiver relação com finanças pessoais, diga que só ajuda com isso.\n\n'
   + 'Dados financeiros atuais do usuário:\n';
 function buildAgentContext(){
@@ -1378,6 +1404,17 @@ function buildAgentContext(){
     for(const i of db.investments){
       const v = invCur(i)||0, c = invCost(i)||0, ret = c ? ((v-c)/c*100) : null;
       lines.push('- '+esc(invName(i))+' ('+(KIND_LBL[i.kind]||i.kind)+'): valor atual '+fmt(v)+(tot>0?', '+(v/tot*100).toFixed(0)+'% da carteira':'')+(ret!=null?', rentabilidade '+(ret>=0?'+':'')+ret.toFixed(1)+'% desde a compra':''));
+    }
+    const setores = {}; let totB3 = 0;
+    for(const i of db.investments){
+      if(i.kind!=='b3') continue;
+      const v = invCur(i)||0; if(v<=0) continue;
+      const setor = SETOR_MAP[i.ticker.toUpperCase()] || 'Não catalogado';
+      setores[setor] = (setores[setor]||0) + v; totB3 += v;
+    }
+    if(Object.keys(setores).length){
+      lines.push('Concentração por setor (dentro da fatia de Ações/FIIs/ETFs): '
+        + Object.entries(setores).sort((a,b)=>b[1]-a[1]).map(([s,v])=>s+' '+(v/totB3*100).toFixed(0)+'%').join(', '));
     }
   }
   return lines.join('\n');
@@ -1432,26 +1469,21 @@ async function fetchBrapiMarketContext(question){
   if(market.length) parts.push('Cotações reais da B3 — mercado/comparação (inclui ^BVSP = Ibovespa; o usuário NÃO possui os demais, buscados só para responder a pergunta):\n'+market.join('\n'));
   return parts.join('\n\n');
 }
-async function callLocalLLM(question){
-  const cfg = aiCfg();
+async function callCloudAgent(question){
   const market = await fetchBrapiMarketContext(question);
-  const context = AGENT_SYSTEM_PROMPT + buildAgentContext() + (market ? '\n\n'+market : '');
-  const res = await fetch(cfg.url.replace(/\/$/,'')+'/api/chat', {
+  const system = AGENT_SYSTEM_PROMPT + buildAgentContext() + (market ? '\n\n'+market : '');
+  const res = await fetch(bankCfg.url+'/agent', {
     method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      model: cfg.model,
-      stream: false,
-      messages: [
-        {role:'system', content: context},
-        {role:'user', content: question}
-      ]
-    })
+    headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+bankCfg.token},
+    body: JSON.stringify({system, question})
   });
-  if(!res.ok) throw new Error('HTTP '+res.status);
-  const data = await res.json();
-  if(!data.message || !data.message.content) throw new Error('resposta inesperada do Ollama');
-  return data.message.content;
+  const j = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(j.error || ('HTTP '+res.status));
+  if(!j.text) throw new Error('resposta inesperada do Worker/Gemini');
+  return j.text;
+}
+function agentNeedsDisclaimer(question){
+  return /recomend|corretora|corretoras|bancos? indicam|consolidad|converg[êe]ncia|carteira ideal|ranking de a[çc][õo]es/i.test(agentNorm(question));
 }
 async function agentAsk(){
   const inp = document.getElementById('agentQ');
@@ -1460,14 +1492,15 @@ async function agentAsk(){
   agentAppendMsg('user', q);
   inp.value = '';
   const cfg = aiCfg();
-  if(cfg.enabled){
+  if(cfg.enabled && bankCfg.url && bankCfg.token){
     const id = 'msg'+Math.random().toString(36).slice(2);
     agentAppendMsg('bot', '<i class="muted">Pensando…</i>', id);
     try{
-      const ans = await callLocalLLM(q);
+      let ans = await callCloudAgent(q);
+      if(agentNeedsDisclaimer(q) && !ans.includes(DISCLAIMER_CARTEIRA.slice(0,40))) ans += '\n\n'+DISCLAIMER_CARTEIRA;
       agentUpdateMsg(id, esc(ans).replace(/\n/g,'<br>'));
     }catch(e){
-      agentUpdateMsg(id, '⚠ Não consegui falar com a IA local ('+esc(e.message)+'). Resposta por regras:<br>'+agentAnswer(q));
+      agentUpdateMsg(id, '⚠ Não consegui falar com a IA ('+esc(e.message)+'). Resposta por regras:<br>'+agentAnswer(q));
     }
   } else {
     agentAppendMsg('bot', agentAnswer(q));

@@ -8,7 +8,7 @@ const DAYS_BACK = 90; // janela de transações buscada a cada sincronização
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Authorization, Content-Type',
   };
 }
@@ -141,6 +141,35 @@ async function fetchAllBankData(env) {
   return { accounts, transactions };
 }
 
+// ===== agente financeiro (Gemini) — chave nunca sai daqui =====
+// google_search: grounding nativo da API do Gemini, usado pela skill carteira-radar
+// pra buscar carteiras recomendadas/cotações atuais em vez de responder de memória.
+const GEMINI_MODEL = 'gemini-2.0-flash';
+async function callGemini(system, question, apiKey) {
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system || '' }] },
+        contents: [{ role: 'user', parts: [{ text: question || '' }] }],
+        tools: [{ google_search: {} }],
+      }),
+    }
+  );
+  if (!r.ok) {
+    let detail = '';
+    try { const j = await r.json(); detail = (j.error && j.error.message) || JSON.stringify(j); } catch (e) {}
+    throw new Error('Erro na Gemini (HTTP ' + r.status + ')' + (detail ? ': ' + detail : ''));
+  }
+  const j = await r.json();
+  const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
+  const text = parts.map(p => p.text || '').join('');
+  if (!text) throw new Error('Gemini não retornou texto (possível bloqueio de segurança)');
+  return text;
+}
+
 // ===== handler =====
 
 async function handleRequest(request, env) {
@@ -154,6 +183,23 @@ async function handleRequest(request, env) {
   if (url.pathname === '/webhook') {
     if (request.method !== 'POST') return json({ error: 'método não suportado' }, 405);
     return new Response(null, { status: 200 });
+  }
+
+  if (url.pathname === '/agent') {
+    if (request.method !== 'POST') return json({ error: 'método não suportado' }, 405);
+    if (!isAuthorized(request, env.SHARED_TOKEN)) {
+      return json({ error: 'não autorizado — token ausente ou incorreto' }, 401);
+    }
+    if (!env.GEMINI_API_KEY) {
+      return json({ error: 'Worker sem GEMINI_API_KEY configurada (secret ausente)' }, 500);
+    }
+    try {
+      const body = await request.json();
+      const text = await callGemini(body.system, body.question, env.GEMINI_API_KEY);
+      return json({ text });
+    } catch (e) {
+      return json({ error: e.message || 'erro desconhecido ao chamar a IA' }, 502);
+    }
   }
 
   if (url.pathname !== '/sync' && url.pathname !== '/connect-token') return json({ error: 'not found' }, 404);
