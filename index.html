@@ -558,6 +558,10 @@
             <button class="btn sm ghost" onclick="aiTestConn()">Testar conexão</button>
           </div>
           <p class="muted" style="font-size:.72rem;margin-top:8px" id="aiHelpText">Sem IA ligada, as respostas são calculadas por regras a partir dos seus dados (sem custo, funciona para perguntas diretas). Com a IA ligada, o Coach passa a responder perguntas abertas de verdade — a chamada vai pro seu Worker do Cloudflare (o mesmo da conexão bancária, configurado em Backup → Conexão bancária), que fala com a API da Anthropic (Claude Haiku 4.5). A chave nunca fica no navegador. Custo: bem pequeno (~US$ 0,0025 por pergunta). Funciona de qualquer lugar, sem precisar de PC ligado ou Tailscale.</p>
+          <div class="filters" style="margin-top:10px;margin-bottom:0">
+            <input id="twelveDataToken" placeholder="Token gratuito da Twelve Data (ações dos EUA — opcional)" style="flex:1;min-width:220px" onchange="saveTwelveDataToken()">
+          </div>
+          <p class="muted" style="font-size:.72rem;margin-top:6px">Pra falar de ações da Nasdaq/NYSE (Apple, Tesla, Dow Jones etc.) com cotação e histórico real, crie um token grátis em <a href="https://twelvedata.com/pricing" target="_blank" rel="noopener noreferrer">twelvedata.com</a> e cole acima. Sem isso, o Coach só busca cotação real de ações brasileiras (B3, via brapi).</p>
         </details>
       </div>
 
@@ -1252,6 +1256,12 @@ const CAT_KEYWORDS = {
   'Roupas': ['roupa','vestuario','vestuário'],
 };
 function agentNorm(s){ return (s||'').toString().normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase(); }
+// checa se "phrase" aparece como palavra(s) inteira(s) em "text" (já normalizados) — evita
+// que um nome de empresa "case" com um pedaço de outra palavra (ex.: "vale" dentro de "avalie")
+function hasWord(text, phrase){
+  const esc = phrase.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  return new RegExp('\\b'+esc+'\\b').test(text);
+}
 function agentFindCat(qn){
   for(const cat of CATS_D){
     const kws = CAT_KEYWORDS[cat]; if(!kws) continue;
@@ -1364,10 +1374,15 @@ function aiCfg(){
 function renderAiCfg(){
   const cfg = aiCfg();
   aiEnabled.checked = !!cfg.enabled;
+  if(document.activeElement!==twelveDataToken) twelveDataToken.value = db.settings.twelveDataToken||'';
   const help = document.getElementById('aiHelpText');
   if(help && cfg.enabled && !(bankCfg().url && bankCfg().token)){
     aiStatus.textContent = '⚠ Configure a conexão bancária primeiro (Backup → Conexão bancária em tempo real) — o agente usa o mesmo Worker.';
   }
+}
+function saveTwelveDataToken(){
+  db.settings.twelveDataToken = twelveDataToken.value.trim();
+  save();
 }
 function aiSaveCfg(){
   const cfg = aiCfg();
@@ -1410,15 +1425,116 @@ const SETOR_MAP = {
   TOTS3:'Tecnologia e telecom', VIVT3:'Tecnologia e telecom', BMOB3:'Tecnologia e telecom', LWSA3:'Tecnologia e telecom',
   TTEN3:'Agro', SLCE3:'Agro', SMTO3:'Agro', ORVR3:'Agro',
 };
+// ===== ações dos EUA (Nasdaq/NYSE) via Twelve Data — só reconhece tickers/nomes desta lista fechada,
+// pra não confundir sigla de 4 letras aleatória (ex. "USA", "MUST") com um ticker de verdade =====
+const US_TICKERS = {
+  AAPL:'Apple', MSFT:'Microsoft', GOOGL:'Alphabet (Google)', GOOG:'Alphabet (Google)', AMZN:'Amazon', META:'Meta (Facebook)',
+  TSLA:'Tesla', NVDA:'Nvidia', NFLX:'Netflix', AMD:'AMD', INTC:'Intel', ORCL:'Oracle', CRM:'Salesforce', ADBE:'Adobe',
+  PYPL:'PayPal', DIS:'Disney', KO:'Coca-Cola', PEP:'PepsiCo', MCD:"McDonald's", NKE:'Nike', WMT:'Walmart', COST:'Costco',
+  JPM:'JPMorgan', BAC:'Bank of America', GS:'Goldman Sachs', V:'Visa', MA:'Mastercard',
+  XOM:'Exxon Mobil', CVX:'Chevron', BA:'Boeing', IBM:'IBM', UBER:'Uber', ABNB:'Airbnb', SBUX:'Starbucks',
+  VZ:'Verizon', PFE:'Pfizer', JNJ:'Johnson & Johnson', UNH:'UnitedHealth', QCOM:'Qualcomm', CSCO:'Cisco',
+};
+const US_INDEX_ALIASES = {
+  'dow jones':'DJI', 'dow':'DJI', 'nasdaq composto':'IXIC', 'nasdaq composite':'IXIC', 'nasdaq':'IXIC',
+  's&p 500':'SPX', 'sp500':'SPX', 's&p':'SPX', 'ibovespa':'^BVSP',
+};
+// nomes ambíguos com palavras comuns (ex.: "meta" = objetivo) ficam de fora — só o ticker
+// exato (ex.: "META") ou um apelido inequívoco (ex.: "facebook") entram como alias de nome
+const US_NAME_ALIASES = {
+  apple:'AAPL', microsoft:'MSFT', google:'GOOGL', alphabet:'GOOGL', amazon:'AMZN', facebook:'META',
+  tesla:'TSLA', nvidia:'NVDA', netflix:'NFLX', intel:'INTC', oracle:'ORCL', salesforce:'CRM', adobe:'ADBE',
+  paypal:'PYPL', disney:'DIS', 'coca-cola':'KO', 'coca cola':'KO', pepsi:'PEP', mcdonald:'MCD', nike:'NKE',
+  walmart:'WMT', costco:'COST', jpmorgan:'JPM', 'jp morgan':'JPM', 'bank of america':'BAC', 'goldman sachs':'GS',
+  mastercard:'MA', exxon:'XOM', chevron:'CVX', boeing:'BA', uber:'UBER', airbnb:'ABNB', starbucks:'SBUX',
+  verizon:'VZ', pfizer:'PFE', qualcomm:'QCOM', cisco:'CSCO',
+};
+// tickers que também são palavras comuns (ex.: "META" = objetivo) só contam se aparecerem
+// EXATAMENTE maiúsculas na pergunta original — senão "minha meta de economia" dispararia a ação
+const US_AMBIGUOUS_TICKERS = new Set(['META']);
+function findUsTickers(rawQuestion){
+  const raw = rawQuestion||'';
+  const upper = raw.toUpperCase();
+  const qn = agentNorm(rawQuestion);
+  const found = new Set();
+  for(const t of Object.keys(US_TICKERS)){
+    const re = new RegExp('(^|[^A-Za-z])'+t+'([^A-Za-z]|$)');
+    if(re.test(US_AMBIGUOUS_TICKERS.has(t) ? raw : upper)) found.add(t);
+  }
+  for(const [name, sym] of Object.entries(US_NAME_ALIASES)) if(hasWord(qn, agentNorm(name))) found.add(sym);
+  for(const [name, sym] of Object.entries(US_INDEX_ALIASES)) if(hasWord(qn, agentNorm(name))) found.add(sym);
+  return [...found];
+}
+// nomes das principais empresas da B3 → ticker. Fora da lista: palavras comuns do português que
+// também são nomes de ação (Vale, Azul, Rumo, Tenda, Vivo, Porto...) — digitar o TICKER continua
+// funcionando pra essas; só o "nome por extenso" fica de fora pra não confundir com uso comum da palavra.
+const BR_NAME_ALIASES = {
+  itau:'ITUB4', bradesco:'BBDC4', 'banco do brasil':'BBAS3', santander:'SANB11', btg:'BPAC11', 'btg pactual':'BPAC11', nubank:'ROXO34',
+  'bb seguridade':'BBSE3', 'caixa seguridade':'CXSE3', 'porto seguro':'PSSA3', irb:'IRBR3',
+  petrobras:'PETR4', ultrapar:'UGPA3', petroreconcavo:'RECV3', cosan:'CSAN3',
+  csn:'CSNA3', gerdau:'GGBR4', usiminas:'USIM5', 'csn mineracao':'CMIN3',
+  eletrobras:'ELET3', equatorial:'EQTL3', copel:'CPLE3', eneva:'ENEV3', engie:'EGIE3', sabesp:'SBSP3', copasa:'CSMG3', taesa:'TAEE11',
+  ambev:'ABEV3', 'magazine luiza':'MGLU3', magalu:'MGLU3', renner:'LREN3', assai:'ASAI3', carrefour:'CRFB3', natura:'NTCO3', 'pao de acucar':'PCAR3', cury:'CURY3', 'smart fit':'SMFT3',
+  'rede dor':'RDOR3', hapvida:'HAPV3', fleury:'FLRY3', 'pague menos':'PGMN3',
+  embraer:'EMBR3', weg:'WEGE3', localiza:'RENT3', marcopolo:'POMO4',
+  suzano:'SUZB3', klabin:'KLBN11', dexco:'DXCO3',
+  multiplan:'MULT3', jhsf:'JHSF3', cyrela:'CYRE3',
+  totvs:'TOTS3', telefonica:'VIVT3', locaweb:'LWSA3',
+  '3tentos':'TTEN3', slc:'SLCE3', 'sao martinho':'SMTO3',
+};
+function findBrTickers(rawQuestion){
+  const qn = agentNorm(rawQuestion);
+  const found = new Set();
+  for(const [name, sym] of Object.entries(BR_NAME_ALIASES)) if(hasWord(qn, agentNorm(name))) found.add(sym);
+  return [...found];
+}
+async function fetchTwelveDataQuote(symbol, apikey){
+  try{
+    const r = await fetch('https://api.twelvedata.com/quote?symbol='+encodeURIComponent(symbol)+'&apikey='+encodeURIComponent(apikey));
+    const j = await r.json();
+    if(j.status==='error' || !j.close) return null;
+    const price = parseFloat(j.close), chgPct = j.percent_change!=null ? parseFloat(j.percent_change) : null;
+    let line = '- '+symbol+' ('+(j.name||US_TICKERS[symbol]||symbol)+'): preço atual US$ '+price.toFixed(2)
+      +', variação do dia '+(chgPct!=null?(chgPct>=0?'+':'')+chgPct.toFixed(2)+'%':'sem dado')
+      +(j.fifty_two_week ? ', faixa 52 semanas: US$ '+j.fifty_two_week.low+' a US$ '+j.fifty_two_week.high : '');
+    const rh = await fetch('https://api.twelvedata.com/time_series?symbol='+encodeURIComponent(symbol)+'&interval=1month&outputsize=4&apikey='+encodeURIComponent(apikey));
+    const jh = await rh.json();
+    if(Array.isArray(jh.values) && jh.values.length>=2){
+      const vals = [...jh.values].reverse(); // a Twelve Data retorna do mais recente pro mais antigo
+      const changes = [];
+      for(let k=1;k<vals.length;k++){
+        const c0=parseFloat(vals[k-1].close), c1=parseFloat(vals[k].close);
+        const chg=(c1-c0)/c0*100;
+        changes.push(vals[k].datetime.slice(0,7)+': '+(chg>=0?'+':'')+chg.toFixed(1)+'%');
+      }
+      line += '\n  Variação mês a mês (fechamento real): '+changes.join(', ');
+    }
+    return line;
+  }catch(e){ return null; }
+}
+async function fetchUsMarketContext(question){
+  const apikey = db.settings.twelveDataToken;
+  if(!apikey) return '';
+  const tickers = findUsTickers(question).slice(0, 5); // limite pra respeitar o plano gratuito (8 chamadas/min)
+  if(!tickers.length) return '';
+  const lines = [];
+  for(const t of tickers){
+    const line = await fetchTwelveDataQuote(t, apikey);
+    if(line) lines.push(line);
+    await sleepMs(400);
+  }
+  return lines.length ? 'Cotações reais de ações/índices dos EUA (Nasdaq/NYSE, via Twelve Data, buscadas agora):\n'+lines.join('\n') : '';
+}
 const AGENT_SYSTEM_PROMPT = 'Você é um agente financeiro pessoal. Responda sempre em português, de forma direta e objetiva (poucas frases, a menos que peçam mais detalhe).\n'
   + 'Regras obrigatórias:\n'
   + '- Baseie-se SOMENTE nos dados fornecidos abaixo (números reais do usuário). Nunca invente valores nem estime dados que não foram dados.\n'
   + '- Separe sempre fato (o que já aconteceu, lançado pelo usuário) de projeção/estimativa, e deixe explícitas as suposições quando projetar algo.\n'
   + '- Você PODE e DEVE descrever e analisar em detalhe os ativos que o usuário já tem na carteira (listados abaixo): quanto vale, qual % da carteira, rentabilidade desde a compra, o que é o ativo/setor, riscos e características gerais. Isso é análise permitida, não é recomendação.\n'
   + '- O único limite: NUNCA diga se ele deve comprar, vender, aumentar ou reduzir posição em um ativo (existente ou novo), nem dê timing de mercado ou "veredito" de bom/mau investimento. Se perguntarem isso especificamente, recuse só essa parte (uma frase, sem ser seco: diga que não é consultor licenciado) e IMEDIATAMENTE continue com a análise descritiva que você pode fazer sobre esse mesmo ativo. Nunca responda só "não posso ajudar com isso" sem mais nada.\n'
-  + '- Pode haver duas seções de cotação da B3: uma com ativos que o usuário JÁ POSSUI e outra de "mercado/comparação" (inclui o Ibovespa ^BVSP e qualquer ativo que ele mencionou na pergunta mas não possui). Use SÓ os números dessas seções para falar de preço/variação — nunca invente variação de um mês que não está listado; se faltar o dado, diga que não tem em vez de estimar.\n'
-  + '- Quando o usuário pedir para comparar a rentabilidade de um ativo com "concorrentes", "o mercado", o Ibovespa ou outro papel específico, isso é análise comparativa permitida (não é recomendação) — compare os números reais das duas seções livremente, deixando claro quais ativos são da carteira do usuário e quais são só para comparação.\n'
-  + '- Você tem acesso a busca no Google. Quando o usuário perguntar o que bancos/corretoras estão recomendando, pedir um consolidado de carteiras recomendadas, ranking de ações mais indicadas, ou o "consenso do mercado", BUSQUE informação atual (mês corrente) em vez de responder de memória — nunca invente que uma corretora recomendou algo. Cite as casas de análise e a data do levantamento. Se a busca não trouxer dado do mês atual, diga isso claramente e mostre o mais recente encontrado, com a data.\n'
+  + '- Pode haver seções de cotação real (B3 e/ou EUA): uma com ativos que o usuário JÁ POSSUI e outra de "mercado/comparação" (índices como Ibovespa ^BVSP, Dow Jones DJI, Nasdaq IXIC, S&P 500 SPX, e qualquer ativo que ele mencionou na pergunta mas não possui). Use SÓ os números dessas seções para falar de preço/variação — nunca invente variação de um mês que não está listado; se faltar o dado, diga que não tem em vez de estimar.\n'
+  + '- Se perguntarem sobre um ativo/ticker e não houver seção de cotação dele nos dados abaixo, diga claramente que não tem o dado agora (o ticker pode não ter sido reconhecido) em vez de responder com preço de memória — preços de memória ficam desatualizados rápido.\n'
+  + '- Quando o usuário pedir para comparar a rentabilidade de um ativo com "concorrentes", "o mercado", um índice (Ibovespa, Dow Jones, Nasdaq, S&P 500) ou outro papel específico (nacional ou dos EUA), isso é análise comparativa permitida (não é recomendação) — compare os números reais das seções livremente, deixando claro quais ativos são da carteira do usuário e quais são só para comparação.\n'
+  + '- IMPORTANTE: você NÃO tem acesso a busca na internet em tempo real. Quando o usuário perguntar o que bancos/corretoras estão recomendando este mês, pedir um consolidado de carteiras recomendadas ou o "consenso do mercado" atual, diga com todas as letras que você não tem acesso a dados ao vivo da internet pra isso e não pode confirmar recomendações atuais de corretoras — nunca invente nem finja ter pesquisado. Ofereça em vez disso analisar os ativos que o usuário já tem ou os que ele citar (usando as cotações reais fornecidas abaixo).\n'
   + '- Ao reportar concentração (por ativo ou por setor), seja só descritivo e neutro: "X% da carteira está em Y". NUNCA diga se é "demais" ou "de menos", nem sugira rebalancear. Se perguntarem se é concentração excessiva, explique que depende do perfil e objetivo da pessoa, dê referências gerais de diversificação de forma educativa, e sugira um assessor/consultor de investimentos registrado na CVM para um julgamento sobre o caso dela.\n'
   + '- Se o usuário pedir explicitamente "me diga o que comprar", "monte minha carteira ideal" ou "devo vender X?", recuse essa parte com gentileza (você não é consultor licenciado) e ofereça em vez disso mostrar o consenso do mercado e/ou a situação atual da carteira dela.\n'
   + '- Sempre que a resposta apresentar um painel de recomendações de mercado (consolidado de corretoras) ou uma análise completa da carteira com concentração, termine com este aviso, reproduzido na íntegra: "'+DISCLAIMER_CARTEIRA+'"\n'
@@ -1514,7 +1630,9 @@ async function fetchBrapiMarketContext(question){
   const tok = db.settings.brapiToken;
   if(!tok) return '';
   const portfolioTickers = [...new Set(db.investments.filter(i=>i.kind==='b3').map(i=>i.ticker.toUpperCase()))];
-  const mentioned = [...new Set(((question||'').toUpperCase().match(/\b[A-Z]{4}\d{1,2}\b/g))||[])];
+  const byCode = [...new Set(((question||'').toUpperCase().match(/\b[A-Z]{4}\d{1,2}\b/g))||[])];
+  const byName = findBrTickers(question);
+  const mentioned = [...new Set([...byCode, ...byName])];
   const extraTickers = mentioned.filter(t=>!portfolioTickers.includes(t));
   const allTickers = [...portfolioTickers, ...extraTickers, '^BVSP'].slice(0, 6); // limite pra não estourar o rate limit do plano
   if(!allTickers.length) return '';
@@ -1530,8 +1648,8 @@ async function fetchBrapiMarketContext(question){
   return parts.join('\n\n');
 }
 async function callCloudAgent(question){
-  const market = await fetchBrapiMarketContext(question);
-  const system = AGENT_SYSTEM_PROMPT + buildAgentContext() + (market ? '\n\n'+market : '');
+  const [market, usMarket] = await Promise.all([fetchBrapiMarketContext(question), fetchUsMarketContext(question)]);
+  const system = AGENT_SYSTEM_PROMPT + buildAgentContext() + (market ? '\n\n'+market : '') + (usMarket ? '\n\n'+usMarket : '');
   const res = await fetch(bankCfg().url+'/agent', {
     method: 'POST',
     headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+bankCfg().token},
