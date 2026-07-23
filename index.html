@@ -915,7 +915,7 @@
       <button type="button" class="btn sm" onclick="connectBank()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg> Conectar/reconectar banco</button>
       <button type="button" class="btn sm danger" onclick="bankShowSetup()">Trocar / remover</button>
     </div>
-    <p class="muted" style="font-size:.75rem">Isso conecta com o Worker do Cloudflare que você publicou — ele busca os dados no Meu Pluggy. Nenhuma credencial bancária passa por aqui, só o endereço do Worker e o token combinado entre os dois. Depois de configurar, use o botão "Atualizar do banco" na aba Lançamentos.</p>
+    <p class="muted" style="font-size:.75rem">Isso conecta com o Worker do Cloudflare que você publicou — ele busca os dados no Meu Pluggy. Nenhuma credencial bancária passa por aqui, só o endereço do Worker e o token combinado entre os dois. Depois de configurar, use o botão "Atualizar do banco" na aba Lançamentos. Configure uma vez: essa conexão é sincronizada entre seus aparelhos (vai junto na nuvem), então o celular pega sozinho.</p>
     <div class="actions"><button class="btn ghost">Fechar</button></div>
   </form>
 </dialog>
@@ -953,6 +953,7 @@ function migrate(d){
   if(!d.sinking) d.sinking = [];
   if(!d.importedTrades) d.importedTrades = []; // registro leve pra detectar reimportação de nota de corretagem
   if(!d.importedBankTxIds) d.importedBankTxIds = []; // IDs da Pluggy já importados, pra não duplicar em sincronizações repetidas
+  if(!d.settings.bank) d.settings.bank = {}; // conexão bancária/IA (URL do Worker + token) — sincronizada entre aparelhos
   if(!d.sinkingPaid) d.sinkingPaid = {};
   if(d.settings.debtExtra===undefined) d.settings.debtExtra = 0;
   if(d.settings.ipcaExp===undefined) d.settings.ipcaExp = 4.5;
@@ -1364,7 +1365,7 @@ function renderAiCfg(){
   const cfg = aiCfg();
   aiEnabled.checked = !!cfg.enabled;
   const help = document.getElementById('aiHelpText');
-  if(help && cfg.enabled && !(bankCfg.url && bankCfg.token)){
+  if(help && cfg.enabled && !(bankCfg().url && bankCfg().token)){
     aiStatus.textContent = '⚠ Configure a conexão bancária primeiro (Backup → Conexão bancária em tempo real) — o agente usa o mesmo Worker.';
   }
 }
@@ -1376,15 +1377,15 @@ function aiSaveCfg(){
   renderAiCfg();
 }
 async function aiTestConn(){
-  if(!bankCfg.url || !bankCfg.token){
+  if(!bankCfg().url || !bankCfg().token){
     aiStatus.textContent = '⚠ Configure a conexão bancária primeiro (Backup → Conexão bancária em tempo real) — o agente usa o mesmo Worker.';
     return;
   }
-  aiStatus.textContent = 'Testando conexão com '+bankCfg.url+'/agent ...';
+  aiStatus.textContent = 'Testando conexão com '+bankCfg().url+'/agent ...';
   try{
-    const r = await fetch(bankCfg.url+'/agent', {
+    const r = await fetch(bankCfg().url+'/agent', {
       method: 'POST',
-      headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+bankCfg.token},
+      headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+bankCfg().token},
       body: JSON.stringify({system:'Responda só "ok".', question:'diga ok'})
     });
     const j = await r.json();
@@ -1531,9 +1532,9 @@ async function fetchBrapiMarketContext(question){
 async function callCloudAgent(question){
   const market = await fetchBrapiMarketContext(question);
   const system = AGENT_SYSTEM_PROMPT + buildAgentContext() + (market ? '\n\n'+market : '');
-  const res = await fetch(bankCfg.url+'/agent', {
+  const res = await fetch(bankCfg().url+'/agent', {
     method: 'POST',
-    headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+bankCfg.token},
+    headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+bankCfg().token},
     body: JSON.stringify({system, question})
   });
   const j = await res.json().catch(()=>({}));
@@ -1551,7 +1552,7 @@ async function agentAsk(){
   agentAppendMsg('user', q);
   inp.value = '';
   const cfg = aiCfg();
-  if(cfg.enabled && bankCfg.url && bankCfg.token){
+  if(cfg.enabled && bankCfg().url && bankCfg().token){
     const id = 'msg'+Math.random().toString(36).slice(2);
     agentAppendMsg('bot', '<i class="muted">Pensando…</i>', id);
     try{
@@ -3092,10 +3093,16 @@ async function cloudSyncNow(silent){
   if(!silent) cloudStatus.textContent = 'Sincronizando...';
   try{
     const remote = await cloudPull();
+    // config bancária é "grudenta": se este aparelho já a tem e o remoto (mais novo) não,
+    // preserva e re-propaga — senão adotar o remoto apagaria a config recém-migrada
+    const localBank = (db.settings && db.settings.bank && db.settings.bank.url) ? db.settings.bank : null;
     if((remote.savedAt||'') > (db.savedAt||'')){
       db = migrate(remote);
+      let repush = false;
+      if(localBank && !(db.settings.bank && db.settings.bank.url)){ db.settings.bank = localBank; repush = true; }
       localStorage.setItem(KEY, JSON.stringify(db));
       autoLaunchRecurring(); snapshotNW(); snapshotScore(); renderAll();
+      if(repush) await cloudPush(); // envia de volta já com a config, pros outros aparelhos pegarem
     } else if((db.savedAt||'') > (remote.savedAt||'')){
       await cloudPush();
     }
@@ -3169,28 +3176,39 @@ async function initCloud(){
 }
 
 // ===== conexão bancária em tempo real (Cloudflare Worker + Meu Pluggy) =====
-// Config fica FORA de db (localStorage separado), mesmo motivo do token de nuvem: nunca deve
-// ser incluída em backups/sincronização — é específica de cada aparelho.
+// A config (URL do Worker + token compartilhado) fica em db.settings.bank para sincronizar
+// entre aparelhos via Gist. bankCfg() sempre lê o db vivo, então sobrevive a um pull da nuvem.
 const BANK_KEY = 'gastosBank';
-let bankCfg = {};
-try{ bankCfg = JSON.parse(localStorage.getItem(BANK_KEY)) || {}; }catch(e){ bankCfg = {}; }
+function bankCfg(){ if(!db.settings.bank) db.settings.bank = {}; return db.settings.bank; }
+// migração única: versões antigas guardavam a config só neste aparelho (localStorage gastosBank).
+// Move pra dentro do db (sincronizado) e apaga a cópia local.
+(function migrateBankCfg(){
+  try{
+    const old = JSON.parse(localStorage.getItem(BANK_KEY)||'null');
+    if(old && old.url && old.token && !(db.settings.bank && db.settings.bank.url)){
+      db.settings.bank = {url:old.url, token:old.token};
+      localStorage.setItem(KEY, JSON.stringify(db));
+    }
+    localStorage.removeItem(BANK_KEY);
+  }catch(e){}
+})();
 
-function saveBankCfg(){ localStorage.setItem(BANK_KEY, JSON.stringify(bankCfg)); }
 function bankSaveConfig(){
   const url = bankWorkerUrl.value.trim().replace(/\/+$/,'');
   const tok = bankToken.value.trim();
   if(!url || !tok){ bankStatus.textContent = 'Preencha a URL do Worker e o token.'; return; }
-  bankCfg = {url, token:tok};
-  saveBankCfg();
+  db.settings.bank = {url, token:tok};
+  save();
   renderBankUI();
 }
 function bankShowSetup(){
-  bankCfg = {}; localStorage.removeItem(BANK_KEY);
+  db.settings.bank = {};
+  save();
   renderBankUI();
 }
 function renderBankUI(){
   if(!document.getElementById('bankStatus')) return;
-  const connected = !!(bankCfg.url && bankCfg.token);
+  const connected = !!(bankCfg().url && bankCfg().token);
   bankSetup.style.display = connected ? 'none' : '';
   bankConnected.style.display = connected ? 'flex' : 'none';
   bankStatus.textContent = connected ? '✓ Conectado ao Worker' : 'Nenhuma conexão bancária configurada ainda.';
@@ -3210,12 +3228,12 @@ function ensurePluggyConnect(){
   return pluggyConnectLoading;
 }
 async function connectBank(){
-  if(!bankCfg.url || !bankCfg.token){
+  if(!bankCfg().url || !bankCfg().token){
     alert('Configure a conexão bancária primeiro.');
     return;
   }
   try{
-    const r = await fetch(bankCfg.url+'/connect-token', {headers:{Authorization:'Bearer '+bankCfg.token}});
+    const r = await fetch(bankCfg().url+'/connect-token', {headers:{Authorization:'Bearer '+bankCfg().token}});
     const j = await r.json();
     if(!r.ok) throw new Error(j.error || ('Erro HTTP '+r.status));
     await ensurePluggyConnect();
@@ -3236,7 +3254,7 @@ async function connectBank(){
 }
 let lastBankAccounts = [];
 async function syncBankData(){
-  if(!bankCfg.url || !bankCfg.token){
+  if(!bankCfg().url || !bankCfg().token){
     alert('Configure a conexão bancária primeiro (Backup → Conexão bancária em tempo real).');
     return;
   }
@@ -3244,7 +3262,7 @@ async function syncBankData(){
   const orig = btn ? btn.innerHTML : ''; // innerHTML: o rótulo tem ícone SVG, textContent o perderia
   if(btn){ btn.disabled = true; btn.textContent = 'Buscando...'; }
   try{
-    const r = await fetch(bankCfg.url+'/sync', {headers:{Authorization:'Bearer '+bankCfg.token}});
+    const r = await fetch(bankCfg().url+'/sync', {headers:{Authorization:'Bearer '+bankCfg().token}});
     const j = await r.json();
     if(!r.ok) throw new Error(j.error || ('Erro HTTP '+r.status));
     lastBankAccounts = j.accounts || [];
