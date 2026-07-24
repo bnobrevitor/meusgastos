@@ -1437,8 +1437,9 @@ const SETOR_MAP = {
   TOTS3:'Tecnologia e telecom', VIVT3:'Tecnologia e telecom', BMOB3:'Tecnologia e telecom', LWSA3:'Tecnologia e telecom',
   TTEN3:'Agro', SLCE3:'Agro', SMTO3:'Agro', ORVR3:'Agro',
 };
-// ===== ações dos EUA (Nasdaq/NYSE) via Twelve Data — só reconhece tickers/nomes desta lista fechada,
-// pra não confundir sigla de 4 letras aleatória (ex. "USA", "MUST") com um ticker de verdade =====
+// ===== ações dos EUA (Nasdaq/NYSE) via Twelve Data. A detecção de ticker (findUsTickers, abaixo)
+// não fica presa a esta lista — ela só serve de nome bonito de exibição quando a Twelve Data não
+// devolve o nome completo, e alimenta os apelidos por nome (US_NAME_ALIASES) =====
 const US_TICKERS = {
   AAPL:'Apple', MSFT:'Microsoft', GOOGL:'Alphabet (Google)', GOOG:'Alphabet (Google)', AMZN:'Amazon', META:'Meta (Facebook)',
   TSLA:'Tesla', NVDA:'Nvidia', NFLX:'Netflix', AMD:'AMD', INTC:'Intel', ORCL:'Oracle', CRM:'Salesforce', ADBE:'Adobe',
@@ -1446,6 +1447,7 @@ const US_TICKERS = {
   JPM:'JPMorgan', BAC:'Bank of America', GS:'Goldman Sachs', V:'Visa', MA:'Mastercard',
   XOM:'Exxon Mobil', CVX:'Chevron', BA:'Boeing', IBM:'IBM', UBER:'Uber', ABNB:'Airbnb', SBUX:'Starbucks',
   VZ:'Verizon', PFE:'Pfizer', JNJ:'Johnson & Johnson', UNH:'UnitedHealth', QCOM:'Qualcomm', CSCO:'Cisco',
+  PLTR:'Palantir', COIN:'Coinbase', SOFI:'SoFi',
 };
 const US_INDEX_ALIASES = {
   'dow jones':'DJI', 'dow':'DJI', 'nasdaq composto':'IXIC', 'nasdaq composite':'IXIC', 'nasdaq':'IXIC',
@@ -1459,20 +1461,22 @@ const US_NAME_ALIASES = {
   paypal:'PYPL', disney:'DIS', 'coca-cola':'KO', 'coca cola':'KO', pepsi:'PEP', mcdonald:'MCD', nike:'NKE',
   walmart:'WMT', costco:'COST', jpmorgan:'JPM', 'jp morgan':'JPM', 'bank of america':'BAC', 'goldman sachs':'GS',
   mastercard:'MA', exxon:'XOM', chevron:'CVX', boeing:'BA', uber:'UBER', airbnb:'ABNB', starbucks:'SBUX',
-  verizon:'VZ', pfizer:'PFE', qualcomm:'QCOM', cisco:'CSCO',
+  verizon:'VZ', pfizer:'PFE', qualcomm:'QCOM', cisco:'CSCO', palantir:'PLTR', coinbase:'COIN', sofi:'SOFI',
 };
-// tickers que também são palavras comuns (ex.: "META" = objetivo) só contam se aparecerem
-// EXATAMENTE maiúsculas na pergunta original — senão "minha meta de economia" dispararia a ação
-const US_AMBIGUOUS_TICKERS = new Set(['META']);
+// qualquer sigla de 1-5 letras TODA MAIÚSCULA no texto original é candidata a ticker dos EUA —
+// não depende de uma lista fixa (por isso cobre qualquer ação, tipo PLTR, que eu não tenha
+// catalogado nominalmente). A própria Twelve Data confirma se existe de verdade; se não existir,
+// a chamada simplesmente não traz nada (sem custo além da requisição). A lista abaixo evita gastar
+// cota com siglas maiúsculas comuns no contexto do app que não são ação.
+const US_TICKER_STOPWORDS = new Set([
+  'EUA','USA','CDI','IPCA','PIX','CPF','CNPJ','IOF','FGTS','INSS','IR','CVM','OK','PDF','CEO','CFO','ETF','FII','B3',
+  'O','A','OS','AS','E','OU','DE','DO','DA','EM','UM','SE','TE','MEU','SUA','VOU','PRA','PRO',
+]);
 function findUsTickers(rawQuestion){
   const raw = rawQuestion||'';
-  const upper = raw.toUpperCase();
   const qn = agentNorm(rawQuestion);
   const found = new Set();
-  for(const t of Object.keys(US_TICKERS)){
-    const re = new RegExp('(^|[^A-Za-z])'+t+'([^A-Za-z]|$)');
-    if(re.test(US_AMBIGUOUS_TICKERS.has(t) ? raw : upper)) found.add(t);
-  }
+  for(const m of (raw.match(/\b[A-Z]{1,5}\b/g)||[])) if(!US_TICKER_STOPWORDS.has(m)) found.add(m);
   for(const [name, sym] of Object.entries(US_NAME_ALIASES)) if(hasWord(qn, agentNorm(name))) found.add(sym);
   for(const [name, sym] of Object.entries(US_INDEX_ALIASES)) if(hasWord(qn, agentNorm(name))) found.add(sym);
   return [...found];
