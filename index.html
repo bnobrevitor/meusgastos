@@ -560,7 +560,7 @@
             <input id="twelveDataToken" placeholder="Token gratuito da Twelve Data (ações dos EUA)" style="flex:1;min-width:200px">
             <button class="btn sm" onclick="saveTwelveDataToken()">Salvar</button>
           </div>
-          <p class="muted" style="font-size:.72rem;margin-top:8px">Crie grátis em <b>brapi.dev</b> (B3) e/ou <a href="https://twelvedata.com/pricing" target="_blank" rel="noopener noreferrer">twelvedata.com</a> (Nasdaq/NYSE) e cole o token acima — é só uma vez, o app lembra depois de salvo. Sem eles, o Coach responde só por regras (sem custo), sem cotação real.</p>
+          <p class="muted" style="font-size:.72rem;margin-top:8px">Crie grátis em <b>brapi.dev</b> (B3) e/ou <a href="https://twelvedata.com/pricing" target="_blank" rel="noopener noreferrer">twelvedata.com</a> (Nasdaq/NYSE) e cole o token acima — é só uma vez, o app lembra depois de salvo. Criptomoedas (CoinGecko) e taxas de referência (CDI/Selic/IPCA do Banco Central) já funcionam automaticamente, sem precisar de token.</p>
         </details>
       </div>
 
@@ -1537,13 +1537,75 @@ async function fetchUsMarketContext(question){
   }
   return lines.length ? 'Cotações reais de ações/índices dos EUA (Nasdaq/NYSE, via Twelve Data, buscadas agora):\n'+lines.join('\n') : '';
 }
+// ===== criptomoedas (CoinGecko, sem token) — reconhece pelo símbolo (usa o mesmo mapa COINS
+// da aba Investimentos) ou nome por extenso. SOL e ADA também são palavras comuns do dia a dia
+// ("faz sol hoje", nome próprio "Ada"), então só contam em MAIÚSCULAS exatas, como o META dos EUA.
+const CRYPTO_AMBIGUOUS_SYMBOLS = new Set(['SOL','ADA']);
+const CRYPTO_NAME_ALIASES = {
+  bitcoin:'bitcoin', ethereum:'ethereum', solana:'solana', ripple:'ripple', cardano:'cardano',
+  dogecoin:'dogecoin', binance:'binancecoin', tether:'tether', litecoin:'litecoin', polkadot:'polkadot',
+  chainlink:'chainlink', avalanche:'avalanche-2', polygon:'matic-network', 'shiba inu':'shiba-inu', shiba:'shiba-inu',
+};
+function findCryptoIds(rawQuestion){
+  const raw = rawQuestion||'';
+  const upper = raw.toUpperCase();
+  const qn = agentNorm(rawQuestion);
+  const found = new Set();
+  for(const [sym, id] of Object.entries(COINS)){
+    const re = new RegExp('(^|[^A-Za-z])'+sym+'([^A-Za-z]|$)');
+    if(re.test(CRYPTO_AMBIGUOUS_SYMBOLS.has(sym) ? raw : upper)) found.add(id);
+  }
+  for(const [name, id] of Object.entries(CRYPTO_NAME_ALIASES)) if(hasWord(qn, name)) found.add(id);
+  for(const i of db.investments) if(i.kind==='cripto' && i.coinId) found.add(i.coinId);
+  return [...found];
+}
+async function fetchCoinGeckoQuote(coinId){
+  try{
+    const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids='+encodeURIComponent(coinId)+'&vs_currencies=brl&include_24hr_change=true');
+    const j = await r.json();
+    const d = j[coinId];
+    if(!d || d.brl==null) return null;
+    const chg = d.brl_24h_change;
+    return '- '+coinId+': preço atual '+fmt(d.brl)+(chg!=null?', variação 24h '+(chg>=0?'+':'')+chg.toFixed(2)+'%':', sem dado de variação');
+  }catch(e){ return null; }
+}
+async function fetchCryptoMarketContext(question){
+  const ids = findCryptoIds(question).slice(0, 5);
+  if(!ids.length) return '';
+  const lines = [];
+  for(const id of ids){
+    const line = await fetchCoinGeckoQuote(id);
+    if(line) lines.push(line);
+    await sleepMs(300);
+  }
+  return lines.length ? 'Cotações reais de criptomoedas (CoinGecko, buscadas agora, em reais):\n'+lines.join('\n') : '';
+}
+// ===== taxas de referência (Banco Central, API pública, sem token) — sempre inclui, é barato e rápido =====
+async function fetchBcbRatesContext(){
+  try{
+    const last = arr => (arr && arr.length) ? arr[arr.length-1] : null;
+    const [cdi, selic, ipca] = await Promise.all([
+      bcbSeries(4389, isoAdd(todayISO(),-20)).catch(()=>[]),   // CDI anualizado (% a.a.)
+      bcbSeries(432, isoAdd(todayISO(),-60)).catch(()=>[]),    // Selic meta (% a.a.)
+      bcbSeries(13522, isoAdd(todayISO(),-90)).catch(()=>[]),  // IPCA acumulado 12 meses (%)
+    ]);
+    const cdiL = last(cdi), selicL = last(selic), ipcaL = last(ipca);
+    if(!cdiL && !selicL && !ipcaL) return '';
+    const parts = [];
+    if(cdiL) parts.push('CDI '+cdiL.valor+'% a.a. (dado de '+cdiL.data+')');
+    if(selicL) parts.push('Selic meta '+selicL.valor+'% a.a. (dado de '+selicL.data+')');
+    if(ipcaL) parts.push('IPCA acumulado 12 meses '+ipcaL.valor+'% (dado de '+ipcaL.data+')');
+    return 'Taxas de referência reais (Banco Central, buscadas agora): '+parts.join(', ')+'.';
+  }catch(e){ return ''; }
+}
 const AGENT_SYSTEM_PROMPT = 'Você é um agente financeiro pessoal. Responda sempre em português, de forma direta e objetiva (poucas frases, a menos que peçam mais detalhe).\n'
   + 'Regras obrigatórias:\n'
   + '- Baseie-se SOMENTE nos dados fornecidos abaixo (números reais do usuário). Nunca invente valores nem estime dados que não foram dados.\n'
   + '- Separe sempre fato (o que já aconteceu, lançado pelo usuário) de projeção/estimativa, e deixe explícitas as suposições quando projetar algo.\n'
   + '- Você PODE e DEVE descrever e analisar em detalhe os ativos que o usuário já tem na carteira (listados abaixo): quanto vale, qual % da carteira, rentabilidade desde a compra, o que é o ativo/setor, riscos e características gerais. Isso é análise permitida, não é recomendação.\n'
   + '- O único limite: NUNCA diga se ele deve comprar, vender, aumentar ou reduzir posição em um ativo (existente ou novo), nem dê timing de mercado ou "veredito" de bom/mau investimento. Se perguntarem isso especificamente, recuse só essa parte (uma frase, sem ser seco: diga que não é consultor licenciado) e IMEDIATAMENTE continue com a análise descritiva que você pode fazer sobre esse mesmo ativo. Nunca responda só "não posso ajudar com isso" sem mais nada.\n'
-  + '- Pode haver seções de cotação real (B3 e/ou EUA): uma com ativos que o usuário JÁ POSSUI e outra de "mercado/comparação" (índices como Ibovespa ^BVSP, Dow Jones DJI, Nasdaq IXIC, S&P 500 SPX, e qualquer ativo que ele mencionou na pergunta mas não possui). Use SÓ os números dessas seções para falar de preço/variação — nunca invente variação de um mês que não está listado; se faltar o dado, diga que não tem em vez de estimar.\n'
+  + '- Pode haver seções de cotação real (B3, EUA e/ou criptomoedas): uma com ativos que o usuário JÁ POSSUI e outra de "mercado/comparação" (índices como Ibovespa ^BVSP, Dow Jones DJI, Nasdaq IXIC, S&P 500 SPX, e qualquer ativo/cripto que ele mencionou na pergunta mas não possui). Use SÓ os números dessas seções para falar de preço/variação — nunca invente variação de um mês/dia que não está listado; se faltar o dado, diga que não tem em vez de estimar.\n'
+  + '- Pode haver uma seção "Taxas de referência reais" (CDI, Selic, IPCA do Banco Central) — use esses números sempre que a pergunta envolver renda fixa, inflação ou taxa de juros; nunca invente um valor de CDI/Selic/IPCA que não esteja nessa seção.\n'
   + '- Se perguntarem sobre um ativo/ticker e não houver seção de cotação dele nos dados abaixo, diga claramente que não tem o dado agora (o ticker pode não ter sido reconhecido) em vez de responder com preço de memória — preços de memória ficam desatualizados rápido.\n'
   + '- Quando o usuário pedir para comparar a rentabilidade de um ativo com "concorrentes", "o mercado", um índice (Ibovespa, Dow Jones, Nasdaq, S&P 500) ou outro papel específico (nacional ou dos EUA), isso é análise comparativa permitida (não é recomendação) — compare os números reais das seções livremente, deixando claro quais ativos são da carteira do usuário e quais são só para comparação.\n'
   + '- IMPORTANTE: você NÃO tem acesso a busca na internet em tempo real. Quando o usuário perguntar o que bancos/corretoras estão recomendando este mês, pedir um consolidado de carteiras recomendadas ou o "consenso do mercado" atual, diga com todas as letras que você não tem acesso a dados ao vivo da internet pra isso e não pode confirmar recomendações atuais de corretoras — nunca invente nem finja ter pesquisado. Ofereça em vez disso analisar os ativos que o usuário já tem ou os que ele citar (usando as cotações reais fornecidas abaixo).\n'
@@ -1660,8 +1722,13 @@ async function fetchBrapiMarketContext(question){
   return parts.join('\n\n');
 }
 async function callCloudAgent(question){
-  const [market, usMarket] = await Promise.all([fetchBrapiMarketContext(question), fetchUsMarketContext(question)]);
-  const system = AGENT_SYSTEM_PROMPT + buildAgentContext() + (market ? '\n\n'+market : '') + (usMarket ? '\n\n'+usMarket : '');
+  const [market, usMarket, cryptoMarket, bcbRates] = await Promise.all([
+    fetchBrapiMarketContext(question), fetchUsMarketContext(question),
+    fetchCryptoMarketContext(question), fetchBcbRatesContext(),
+  ]);
+  const system = AGENT_SYSTEM_PROMPT + buildAgentContext()
+    + (market ? '\n\n'+market : '') + (usMarket ? '\n\n'+usMarket : '')
+    + (cryptoMarket ? '\n\n'+cryptoMarket : '') + (bcbRates ? '\n\n'+bcbRates : '');
   const res = await fetch(bankCfg().url+'/agent', {
     method: 'POST',
     headers: {'Content-Type':'application/json', 'Authorization':'Bearer '+bankCfg().token},
