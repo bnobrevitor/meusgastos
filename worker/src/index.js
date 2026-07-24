@@ -142,9 +142,14 @@ async function fetchAllBankData(env) {
 }
 
 // ===== agente financeiro (Claude Haiku 4.5) — chave nunca sai daqui =====
-// custo pequeno por pergunta (~US$ 0,0025) — trocado do Gemini porque o tier gratuito
+// custo pequeno por pergunta (~US$ 0,0025 sem busca) — trocado do Gemini porque o tier gratuito
 // não liberava cota pra essa conta/projeto, algo fora do nosso controle.
 const CLAUDE_MODEL = 'claude-haiku-4-5';
+// busca web nativa da Anthropic (US$ 10/1.000 buscas = US$ 0,01/busca + tokens do conteúdo trazido).
+// Claude só busca quando julga necessário (pergunta sobre algo atual/mutável) — perguntas normais
+// não disparam busca nenhuma, então não têm custo extra. max_uses limita o pior caso por pergunta.
+// web_search_20250305 é a versão básica, compatível com Haiku 4.5 (a versão com "dynamic filtering"
+// só funciona em Opus/Sonnet 4.6+).
 async function callClaude(system, question, apiKey) {
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -155,9 +160,10 @@ async function callClaude(system, question, apiKey) {
     },
     body: JSON.stringify({
       model: CLAUDE_MODEL,
-      max_tokens: 1024,
+      max_tokens: 1536,
       system: system || '',
       messages: [{ role: 'user', content: question || '' }],
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
     }),
   });
   if (!r.ok) {
