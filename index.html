@@ -88,6 +88,8 @@
   .chk{display:flex;align-items:center;gap:6px;font-size:.85rem;cursor:pointer}
   .chk input{width:auto}
   .banner{padding:10px 14px;background:var(--amber-bg);border:1px solid var(--amber);color:#7A5300;border-radius:12px;font-size:.85rem;display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .banner.danger{background:var(--red-bg);border-color:var(--red);color:#8A2F1E}
+  .banner code{background:rgba(0,0,0,.06);padding:1px 5px;border-radius:5px;font-family:'IBM Plex Mono',monospace;font-size:.8em;word-break:break-all}
   .chartwrap{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
   .legend{flex:1;min-width:180px}
   .legend .row{padding:6px 0}
@@ -983,14 +985,48 @@ function migrate(d){
   return d;
 }
 let db;
-try{ db = JSON.parse(localStorage.getItem(KEY)) || seed(); }catch(e){ db = seed(); }
+// dbCorrupted: havia dados salvos e não deu pra lê-los. Isso NÃO é o mesmo que primeira
+// execução, e tratar como se fosse é perigoso: começaríamos do zero e, no primeiro save(),
+// empurraríamos um banco vazio por cima do backup bom que está na nuvem — perda irreversível.
+// Por isso: preserva o original intacto, começa vazio e BLOQUEIA gravação até a nuvem responder.
+let dbCorrupted = false, saveBlocked = false, corruptBackupKey = null, storageFailed = false;
+// lê a config da nuvem direto do localStorage: cloudCfg só é declarado bem mais abaixo e
+// esta checagem precisa acontecer aqui, antes de qualquer gravação
+function cloudConfigured(){
+  try{ const c = JSON.parse(localStorage.getItem('gastosCloud')) || {}; return !!(c.token && c.gistId); }
+  catch(e){ return false; }
+}
+(function loadDb(){
+  const raw = localStorage.getItem(KEY);
+  if(raw === null){ db = seed(); return; }   // primeira execução de verdade
+  let parsed = null;
+  try{ parsed = JSON.parse(raw); }catch(e){}
+  if(parsed && typeof parsed === 'object' && !Array.isArray(parsed)){ db = parsed; return; }
+  dbCorrupted = true;
+  corruptBackupKey = KEY + '-corrompido-' + Date.now();
+  // guarda o original pra não perder o que talvez ainda dê pra recuperar à mão
+  try{ localStorage.setItem(corruptBackupKey, raw); }catch(e){ corruptBackupKey = null; }
+  db = seed();
+})();
 db = migrate(db);
+// só faz sentido travar se existe nuvem pra restaurar; sem ela não há nada a proteger
+if(dbCorrupted && cloudConfigured()) saveBlocked = true;
 
 function save(){
+  if(saveBlocked){ renderDataAlert(); return; }
   db.savedAt = new Date().toISOString();
   snapshotNW();               // mantém o snapshot do mês corrente sempre atual
   snapshotScore();
-  localStorage.setItem(KEY, JSON.stringify(db));
+  // A gravação local pode falhar (cota de ~5 MB cheia, modo privativo, disco). Sem try/catch a
+  // exceção derrubava o resto da função: não sincronizava e nem redesenhava a tela — o
+  // lançamento simplesmente sumia, sem aviso nenhum. Agora avisa e segue: a nuvem ainda salva.
+  try{
+    localStorage.setItem(KEY, JSON.stringify(db));
+    if(storageFailed){ storageFailed = false; renderDataAlert(); }
+  }catch(e){
+    storageFailed = true;
+    renderDataAlert();
+  }
   writeFileSoon();
   cloudSyncSoon();
   renderAll();
@@ -3128,8 +3164,52 @@ const idb = {
 };
 const fsSupported = () => !!window.showSaveFilePicker;
 
-function showBanner(html){ banner.innerHTML = html; banner.style.display='flex'; }
-function hideBanner(){ banner.style.display='none'; }
+function showBanner(html, danger){ banner.innerHTML = html; banner.className = 'banner'+(danger?' danger':''); banner.style.display='flex'; }
+// alertas de integridade dos dados têm prioridade: nenhum outro aviso pode escondê-los
+function hideBanner(){ if(dataAlert()){ renderDataAlert(); return; } banner.style.display='none'; }
+
+// ===== avisos de integridade dos dados =====
+// Do mais grave pro menos grave. São os únicos avisos que o usuário PRECISA ver — os outros
+// são informativos; estes significam risco de perder dados.
+function dataAlert(){
+  if(saveBlocked) return {danger:true, html:
+    '<b>Não foi possível ler seus dados neste aparelho.</b> Estamos buscando a cópia da nuvem. '
+    + 'Nada será gravado até isso terminar, pra não sobrescrever o que está salvo lá.'
+    + '<button class="btn" onclick="retryRestore()">Tentar de novo</button>'};
+  if(storageFailed) return {danger:true, html:
+    '<b>Não foi possível salvar neste aparelho</b> (armazenamento cheio ou bloqueado). '
+    + (cloudConfigured()
+        ? 'Seus dados continuam indo pra nuvem, mas libere espaço no navegador assim que puder.'
+        : 'Suas últimas alterações podem se perder ao fechar a página. Ative a sincronização na nuvem ou libere espaço no navegador.')};
+  if(dbCorrupted) return {danger:false, html:
+    '<b>Os dados deste aparelho estavam ilegíveis e o app começou vazio.</b> '
+    + (corruptBackupKey
+        ? 'Guardamos o conteúdo original em <code>'+esc(corruptBackupKey)+'</code> (armazenamento do navegador), caso dê pra recuperar algo.'
+        : 'Não foi possível guardar uma cópia do original.')
+    + ' Se você tem backup, restaure por Ajustes › Restaurar backup.'};
+  return null;
+}
+function renderDataAlert(){
+  const a = dataAlert();
+  if(!a){ banner.style.display='none'; return; }
+  showBanner(a.html, a.danger);
+}
+// nova tentativa de restaurar da nuvem depois de uma leitura local corrompida
+async function retryRestore(){
+  if(!cloudConfigured()){ saveBlocked = false; renderDataAlert(); return; }
+  showBanner('Buscando seus dados na nuvem...', true);
+  try{
+    await cloudSyncNow(true);
+    resolveCorruption();
+  }catch(e){ renderDataAlert(); }
+}
+// chamado só quando a nuvem trouxe dados mais novos e eles foram adotados — aí o banco
+// vazio do seed já não existe mais e é seguro voltar a gravar
+function resolveCorruption(){
+  if(!dbCorrupted) return;
+  dbCorrupted = false; saveBlocked = false; corruptBackupKey = null;
+  renderDataAlert();
+}
 
 function writeFileSoon(){ if(!fileHandle) return; clearTimeout(wfTimer); wfTimer = setTimeout(writeFile, 600); }
 async function writeFile(){
@@ -3287,6 +3367,9 @@ async function cloudPull(){
   return d;
 }
 async function cloudPush(){
+  // última barreira contra o pior cenário: se a leitura local falhou, db é um banco vazio.
+  // Enviá-lo apagaria o backup bom da nuvem, sem volta. Melhor não sincronizar nada.
+  if(saveBlocked) throw new Error('Envio bloqueado: os dados locais não puderam ser lidos.');
   const content = cloudCfg.pass ? await cloudEncrypt(db, cloudCfg.pass) : JSON.stringify(db);
   const r = await fetch('https://api.github.com/gists/'+cloudCfg.gistId, {
     method:'PATCH', headers: {...ghHeaders(), 'Content-Type':'application/json'},
@@ -3324,7 +3407,8 @@ async function cloudSyncNow(silent){
       db = migrate(remote);
       let repush = false;
       if(localBank && !(db.settings.bank && db.settings.bank.url)){ db.settings.bank = localBank; repush = true; }
-      localStorage.setItem(KEY, JSON.stringify(db));
+      try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){ storageFailed = true; }
+      resolveCorruption(); // adotamos dados de verdade da nuvem: destrava a gravação
       autoLaunchRecurring(); snapshotNW(); snapshotScore(); renderAll();
       if(repush) await cloudPush(); // envia de volta já com a config, pros outros aparelhos pegarem
     } else if((db.savedAt||'') > (remote.savedAt||'')){
@@ -4014,7 +4098,8 @@ function importJSON(input){
     try{
       const d = JSON.parse(rd.result);
       if(!d.accounts || !d.transactions) throw 0;
-      if(confirm('Substituir todos os dados atuais pelo backup?')){ db = migrate(d); save(); dlgBackup.close(); }
+      // restaurar um backup é justamente a saída quando a leitura local falhou: destrava a gravação
+      if(confirm('Substituir todos os dados atuais pelo backup?')){ db = migrate(d); resolveCorruption(); save(); dlgBackup.close(); }
     }catch(e){ alert('Arquivo de backup inválido.'); }
   };
   rd.readAsText(f); input.value='';
@@ -4269,13 +4354,29 @@ function renderAccs(){
   }).join('');
 }
 
+// Rede de segurança: qualquer erro não previsto morria no console — e ninguém abre o console
+// no celular. O sintoma era sempre "o botão não faz nada". Agora pelo menos aparece na tela.
+function reportUnexpected(msg){
+  // avisos de dados são mais graves: em vez de encobri-los, garante que continuem à vista
+  if(dataAlert()){ renderDataAlert(); return; }
+  showBanner('<b>Algo deu errado.</b> '+esc(String(msg||'').slice(0,200))
+    + ' <button class="btn" onclick="location.reload()">Recarregar</button>'
+    + '<button class="btn" onclick="hideBanner()">Dispensar</button>', true);
+}
+window.addEventListener('error', e => reportUnexpected(e.message));
+window.addEventListener('unhandledrejection', e => reportUnexpected(e.reason && e.reason.message || e.reason));
+
 txInst.innerHTML = Array.from({length:24},(_,i)=>`<option value="${i+1}">${i+1}x${i?'':' (à vista)'}</option>`).join('');
 autoLaunchRecurring();
 snapshotNW();
 snapshotScore();
-localStorage.setItem(KEY, JSON.stringify(db));
+// não grava por cima do original quando a leitura falhou: ele ainda pode ser a única cópia
+if(!saveBlocked){
+  try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){ storageFailed = true; }
+}
 renderAll();
 goTab('dash');
+renderDataAlert();
 initFS();
 initCloud();
 renderBankUI();
