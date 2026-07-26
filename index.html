@@ -645,9 +645,8 @@
           <option value="despesa">Despesa fixa</option>
           <option value="receita">Receita fixa</option>
         </select></div>
-      <div style="display:flex;align-items:flex-end;padding-bottom:8px">
-        <label class="chk" style="color:var(--text)"><input type="checkbox" id="rAuto" checked> Lançar automático</label></div>
     </div>
+    <p class="muted" style="font-size:.78rem;margin:-2px 0 4px">Não mexe no seu saldo: fica como previsão até o pagamento aparecer no extrato. Aí o app marca como paga sozinho.</p>
     <div><label>Streaming / assinatura — opcional</label>
       <select id="rStream" onchange="pickStream()"></select></div>
     <div><label>Nome</label><input id="rName" placeholder="Ex.: Aluguel, Netflix, Salário" required></div>
@@ -948,18 +947,30 @@ function seed(){
 }
 // teto das listas anti-duplicata de importação (2000 cobre com folga 90 dias de uso pesado)
 const MAX_IMPORT_IDS = 2000;
+
+// Data de HOJE no fuso do usuário. Usar toISOString() aqui era um bug silencioso: ele devolve
+// UTC, e o Brasil é UTC−3 — das 21h em diante o app já achava que era o dia seguinte. Um gasto
+// lançado às 22h ia pro dia errado, e no dia 31 às 21h ia pro MÊS errado, deslocando orçamento,
+// contas fixas e snapshot de patrimônio. (Declarados aqui em cima porque migrate() já os usa.)
+const todayISO = () => {
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+};
+const nowYM = () => todayISO().slice(0,7);
 function migrate(d){
   if(!d.investments) d.investments = [];
   if(!d.settings) d.settings = {};
   if(!d.goals) d.goals = [];
   if(!d.recurringPaid) d.recurringPaid = {};
+  // vínculo conta fixa -> lançamento real que a quitou: {'2026-07': {recId: txId}}
+  if(!d.recurringMatch) d.recurringMatch = {};
   if(!d.assetsFixed) d.assetsFixed = [];
   if(!d.debts) d.debts = [];
   if(!d.nwHistory) d.nwHistory = {};
   if(!d.settings.ef) d.settings.ef = {profile:'clt', months:6, linkId:'', manualValue:0};
   if(!d.scoreHistory) d.scoreHistory = {};
   for(const g of (d.goals||[])){
-    if(!g.createdYM) g.createdYM = new Date().toISOString().slice(0,7);
+    if(!g.createdYM) g.createdYM = nowYM();
     if(!g.hist) g.hist = [];
     if(g.rate===undefined) g.rate = 0;
     if(g.deadline===undefined) g.deadline = null;
@@ -979,8 +990,7 @@ function migrate(d){
   if(d.settings.nwReal===undefined) d.settings.nwReal = false;
   for(const r of (d.recurring||[])){
     if(!r.type) r.type='despesa';
-    if(r.auto===undefined) r.auto=false;
-    if(!r.createdYM) r.createdYM = new Date().toISOString().slice(0,7);
+    if(!r.createdYM) r.createdYM = nowYM();
   }
   return d;
 }
@@ -1012,30 +1022,34 @@ db = migrate(db);
 // só faz sentido travar se existe nuvem pra restaurar; sem ela não há nada a proteger
 if(dbCorrupted && cloudConfigured()) saveBlocked = true;
 
+// Ponto ÚNICO de gravação local. A cota (~5 MB) pode encher, e o modo privativo de alguns
+// navegadores recusa escrita: sem try/catch a exceção derrubava quem chamou. Nos dois pontos
+// que rodam no carregamento (reconcileRecurring e migrateBankCfg) isso significava o app nem
+// abrir — tela branca. Aqui a falha vira aviso e a execução segue.
+function persist(){
+  if(saveBlocked) return false;
+  try{
+    localStorage.setItem(KEY, JSON.stringify(db));
+    if(storageFailed){ storageFailed = false; renderDataAlert(); }
+    return true;
+  }catch(e){
+    storageFailed = true;
+    renderDataAlert();
+    return false;
+  }
+}
 function save(){
   if(saveBlocked){ renderDataAlert(); return; }
   db.savedAt = new Date().toISOString();
   snapshotNW();               // mantém o snapshot do mês corrente sempre atual
   snapshotScore();
-  // A gravação local pode falhar (cota de ~5 MB cheia, modo privativo, disco). Sem try/catch a
-  // exceção derrubava o resto da função: não sincronizava e nem redesenhava a tela — o
-  // lançamento simplesmente sumia, sem aviso nenhum. Agora avisa e segue: a nuvem ainda salva.
-  try{
-    localStorage.setItem(KEY, JSON.stringify(db));
-    if(storageFailed){ storageFailed = false; renderDataAlert(); }
-  }catch(e){
-    storageFailed = true;
-    renderDataAlert();
-  }
-  writeFileSoon();
+  persist();                  // se falhar, avisa e segue: a nuvem ainda recebe os dados
   cloudSyncSoon();
   renderAll();
 }
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 const fmt = v => (v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-const todayISO = () => new Date().toISOString().slice(0,10);
-const nowYM = () => todayISO().slice(0,7);
 const catColor = c => { const all=[...CATS_D,...CATS_R]; const i=all.indexOf(c); return PALETTE[(i>=0?i:c.length)%PALETTE.length]; };
 const accName = id => { const a=db.accounts.find(a=>a.id===id); return a?a.name:'—'; };
 const fmtDate = d => { const [y,m,dd]=d.split('-'); return dd+'/'+m+'/'+y; };
@@ -1079,10 +1093,19 @@ function spentByCat(ym){
 // ===== previsão de saldo (6 meses) =====
 // só considera lançamentos SEM recId (não gerados por conta fixa) — o efeito das contas fixas já
 // entra separadamente via fixedNet, então contar os dois juntos duplicaria o valor
+// conjunto dos lançamentos reais que já quitam alguma conta fixa — não são gasto "variável"
+function matchedTxIds(){
+  const s = new Set();
+  for(const ym in db.recurringMatch) for(const rid in db.recurringMatch[ym]) s.add(db.recurringMatch[ym][rid]);
+  return s;
+}
 function monthVariableTotals(ym){
   let inc=0, exp=0;
+  // Exclui tanto o histórico antigo (recId) quanto o pagamento detectado no extrato: ele já é
+  // contado em fixedNet, e contá-lo aqui de novo dobraria a despesa fixa na previsão.
+  const casados = matchedTxIds();
   for(const t of monthTx(ym)){
-    if(t.recId) continue;
+    if(t.recId || casados.has(t.id)) continue;
     if(t.type==='receita') inc+=t.amount;
     if(t.type==='despesa') exp+=t.amount;
   }
@@ -1091,12 +1114,15 @@ function monthVariableTotals(ym){
 function computeForecast(){
   const total = db.accounts.reduce((s,a)=>s+accBalance(a),0);
   const fixedNet = db.recurring.reduce((s,r)=> s + (r.type==='receita' ? r.amount : -r.amount), 0);
-  let vInc=0, vExp=0, n=0, ym=prevYM(viewYM);
+  // Ancorada SEMPRE no mês atual, não em viewYM: o ponto de partida é o saldo de hoje, então
+  // rotulá-lo com o mês que o usuário está navegando misturava "hoje" com um mês passado.
+  const base = nowYM();
+  let vInc=0, vExp=0, n=0, ym=prevYM(base);
   for(let i=0;i<3;i++){ const v=monthVariableTotals(ym); vInc+=v.inc; vExp+=v.exp; n++; ym=prevYM(ym); }
   const avgVarNet = n ? (vInc-vExp)/n : 0;
   const monthlyDelta = fixedNet + avgVarNet;
-  const pts=[total], labels=[viewYM];
-  let lym=viewYM;
+  const pts=[total], labels=[base];
+  let lym=base;
   for(let i=0;i<5;i++){ pts.push(pts[pts.length-1]+monthlyDelta); lym=nextYM(lym); labels.push(lym); }
   return {pts, labels, monthlyDelta, fixedNet, avgVarNet};
 }
@@ -1196,7 +1222,7 @@ function applyPrivacy(){
 function togglePrivacy(){
   db.settings.privacy = !db.settings.privacy;
   applyPrivacy();
-  localStorage.setItem(KEY, JSON.stringify(db));
+  persist();
 }
 applyPrivacy();
 
@@ -1947,7 +1973,9 @@ function saveTx(e){
       cat: txType==='transf'?'Transferência':txCat.value,
       acc: txAcc.value, toAcc: txType==='transf'?txTo.value:null, date: txDate.value });
   }
-  dlgTx.close(); save();
+  dlgTx.close();
+  reconcileRecurring();   // o lançamento novo pode ser o pagamento de uma conta fixa em aberto
+  save();
   return false;
 }
 function delTx(id){
@@ -1955,13 +1983,27 @@ function delTx(id){
   if(t.groupId){
     const grupo = db.transactions.filter(x=>x.groupId===t.groupId);
     if(grupo.length>1 && confirm('Este lançamento é parcelado ('+grupo.length+' parcelas). Excluir TODAS as parcelas?')){
+      grupo.forEach(g=>dropMatchByTx(g.id));
       db.transactions = db.transactions.filter(x=>x.groupId!==t.groupId);
       save(); return;
     }
   }
   if(!confirm('Excluir este lançamento?')) return;
+  dropMatchByTx(id);
   db.transactions = db.transactions.filter(x=>x.id!==id);
   save();
+}
+// desfaz o vínculo de um lançamento que está sendo apagado: sem isso a conta fixa continuaria
+// marcada como paga apontando pra um lançamento que não existe mais
+function dropMatchByTx(txId){
+  for(const ym in db.recurringMatch){
+    for(const rid in db.recurringMatch[ym]){
+      if(db.recurringMatch[ym][rid] === txId){
+        delete db.recurringMatch[ym][rid];
+        db.recurringPaid[ym] = (db.recurringPaid[ym]||[]).filter(x=>x!==rid);
+      }
+    }
+  }
 }
 
 // ===== orçamento =====
@@ -2059,7 +2101,7 @@ function pickStream(){
 }
 function openRecDialog(){
   rStream.value=''; rName.value=''; rAmt.value=''; rDay.value='';
-  rType.value='despesa'; rAuto.checked=true; rSince.value=nowYM(); rSince.max=nowYM();
+  rType.value='despesa'; rSince.value=nowYM(); rSince.max=nowYM();
   fillCatSelect(rCat, CATS_D); fillAccSelect(rAcc);
   dlgRec.showModal();
 }
@@ -2071,9 +2113,9 @@ function saveRec(e){
   const since = (rSince.value && rSince.value<=nowYM()) ? rSince.value : nowYM();
   db.recurring.push({ id:uid(), name:rName.value.trim(), amount:parseFloat(rAmt.value),
     day:Math.min(31,Math.max(1,parseInt(rDay.value))), cat:rCat.value, acc:rAcc.value,
-    type:rType.value, auto:rAuto.checked, createdYM:since, stream:rStream.value||null });
+    type:rType.value, createdYM:since, stream:rStream.value||null });
   dlgRec.close();
-  autoLaunchRecurring();
+  reconcileRecurring();
   save(); return false;
 }
 function nextYM(ym){ let [y,m]=ym.split('-').map(Number); m++; if(m>12){m=1;y++} return y+'-'+String(m).padStart(2,'0'); }
@@ -2082,24 +2124,96 @@ function dueDateISO(ym, day){
   const last = new Date(y,m,0).getDate();
   return ym+'-'+String(Math.min(day,last)).padStart(2,'0');
 }
-// replica receitas/despesas fixas automaticamente pelos meses (do cadastro até hoje)
-function autoLaunchRecurring(){
-  let changed=false; const today=todayISO();
+// ===== conciliação: contas fixas são PREVISÃO, não lançamento =====
+// Antes o app criava sozinho um lançamento real na data de vencimento. Isso derrubava o saldo
+// por uma conta que talvez nem tivesse sido paga ainda — o saldo virava uma ficção. Agora a
+// conta fixa é só expectativa (não entra em accBalance) e vira "paga" quando o pagamento de
+// verdade aparece no extrato/banco. O que já foi lançado no passado permanece intocado.
+
+const MATCH_JANELA_DIAS = 10;   // quão longe do vencimento ainda aceitamos o pagamento
+// dias entre duas datas ISO (meio-dia evita escorregar de fuso)
+function daysBetweenISO(a, b){
+  return Math.round((new Date(a+'T12:00:00') - new Date(b+'T12:00:00'))/86400000);
+}
+// Pontua o quanto um lançamento real "parece" o pagamento de uma conta fixa naquele mês.
+// 0 = não serve. Valor NÃO é exigido: luz, água e fatura de cartão mudam todo mês — por isso
+// o portão de confiança é o nome bater (ou o valor bater exato), nunca só a data.
+function recMatchScore(r, t, ym){
+  if(!t.date || !t.amount) return 0;
+  const dist = Math.abs(daysBetweenISO(t.date, dueDateISO(ym, r.day)));
+  if(dist > MATCH_JANELA_DIAS) return 0;
+  const nomeBate = textSimilar(r.name, t.desc);
+  const dif = r.amount ? Math.abs(t.amount - r.amount)/r.amount : 1;
+  const valorExato = dif < 0.005;
+  if(!nomeBate && !valorExato) return 0;   // sem isso viraria chute pela data
+  let s = 0;
+  if(nomeBate) s += 100;
+  if(valorExato) s += 60; else if(dif < 0.25) s += 20;
+  if(t.cat === r.cat) s += 15;
+  if(t.acc === r.acc) s += 10;
+  s += Math.max(0, MATCH_JANELA_DIAS - dist);   // mais perto do vencimento, melhor
+  return s;
+}
+// Varre os lançamentos reais procurando o pagamento de cada conta fixa ainda em aberto.
+// Idempotente: rodar de novo não remarca nem duplica nada.
+function reconcileRecurring(){
+  let changed = false;
+  // um mesmo lançamento não pode quitar duas contas fixas
+  const usados = new Set();
+  for(const ym in db.recurringMatch) for(const rid in db.recurringMatch[ym]) usados.add(db.recurringMatch[ym][rid]);
+  // índice por mês: a janela cruza a virada, então olhamos o mês do vencimento e os vizinhos
+  const porMes = {};
+  for(const t of db.transactions){
+    if(t.recId || !t.date) continue;         // gerado por recorrente antigo: não é candidato
+    (porMes[t.date.slice(0,7)] = porMes[t.date.slice(0,7)]||[]).push(t);
+  }
   for(const r of db.recurring){
-    if(!r.auto) continue;
-    let ym = r.createdYM || nowYM();
-    while(ym <= nowYM()){
-      const due = dueDateISO(ym, r.day);
-      if(!isPaid(r.id, ym) && due <= today){
-        db.transactions.push({id:uid(), recId:r.id, type:r.type||'despesa', amount:r.amount, desc:r.name, cat:r.cat, acc:r.acc, toAcc:null, date:due, stream:r.stream||null});
-        (db.recurringPaid[ym] = db.recurringPaid[ym]||[]).push(r.id);
-        changed = true;
+    let ym = r.createdYM || nowYM(), guarda = 0;
+    while(ym <= nowYM() && guarda++ < 600){
+      if(!isPaid(r.id, ym)){
+        const candidatos = [...(porMes[prevYM(ym)]||[]), ...(porMes[ym]||[]), ...(porMes[nextYM(ym)]||[])];
+        let melhor = null, melhorS = 0;
+        for(const t of candidatos){
+          if(usados.has(t.id)) continue;
+          if((t.type||'despesa') !== (r.type||'despesa')) continue;
+          const s = recMatchScore(r, t, ym);
+          if(s > melhorS){ melhorS = s; melhor = t; }
+        }
+        if(melhor){
+          (db.recurringPaid[ym] = db.recurringPaid[ym]||[]).push(r.id);
+          (db.recurringMatch[ym] = db.recurringMatch[ym]||{})[r.id] = melhor.id;
+          usados.add(melhor.id);
+          // conta de valor variável: o que foi pago de verdade vira a nova expectativa
+          if(ym === nowYM() && Math.abs(melhor.amount - r.amount) > 0.005) r.amount = melhor.amount;
+          changed = true;
+        }
       }
       ym = nextYM(ym);
     }
   }
-  if(changed) localStorage.setItem(KEY, JSON.stringify(db));
+  if(changed) persist();
   return changed;
+}
+// desfaz uma detecção errada (o lançamento real continua existindo, só deixa de quitar a fixa)
+function unmatchRec(recId, ym){
+  db.recurringPaid[ym] = (db.recurringPaid[ym]||[]).filter(id=>id!==recId);
+  if(db.recurringMatch[ym]) delete db.recurringMatch[ym][recId];
+  save();
+}
+// o lançamento real que quitou a conta fixa naquele mês (se houver)
+function recMatchedTx(recId, ym){
+  const id = db.recurringMatch[ym] && db.recurringMatch[ym][recId];
+  return id ? db.transactions.find(t=>t.id===id) : null;
+}
+// total de contas fixas do mês que ainda não foram detectadas como pagas
+function pendingFixed(ym){
+  let desp=0, rec=0;
+  for(const r of db.recurring){
+    if((r.createdYM||nowYM()) > ym) continue;
+    if(isPaid(r.id, ym)) continue;
+    if((r.type||'despesa')==='receita') rec += r.amount; else desp += r.amount;
+  }
+  return {desp, rec};
 }
 // exclui a conta fixa; se ela já gerou lançamentos, pergunta se deve apagá-los também
 // (senão eles ficam "órfãos" e recriar a conta fixa com o mesmo nome gera duplicata)
@@ -2114,20 +2228,24 @@ function delRec(id){
     db.transactions = db.transactions.filter(t=>t.recId!==id);
   }
   for(const ym in db.recurringPaid) db.recurringPaid[ym] = (db.recurringPaid[ym]||[]).filter(rid=>rid!==id);
+  for(const ym in db.recurringMatch) delete db.recurringMatch[ym][id];
   db.recurring = db.recurring.filter(x=>x.id!==id);
   save();
 }
 function isPaid(recId, ym){ return (db.recurringPaid[ym]||[]).includes(recId); }
+// marcação manual: cria o lançamento real (aí sim entra no saldo) e já o vincula à conta fixa
 function payRec(id){
   const r = db.recurring.find(r=>r.id===id); if(!r) return;
-  db.transactions.push({ id:uid(), recId:r.id, type:r.type||'despesa', amount:r.amount, desc:r.name, cat:r.cat, acc:r.acc, toAcc:null, date:dueDateISO(viewYM, r.day), stream:r.stream||null });
+  const tx = { id:uid(), recId:r.id, type:r.type||'despesa', amount:r.amount, desc:r.name, cat:r.cat, acc:r.acc, toAcc:null, date:dueDateISO(viewYM, r.day), stream:r.stream||null };
+  db.transactions.push(tx);
   (db.recurringPaid[viewYM] = db.recurringPaid[viewYM]||[]).push(id);
+  (db.recurringMatch[viewYM] = db.recurringMatch[viewYM]||{})[id] = tx.id;
   save();
 }
 function recStatus(r, ym){
   const rec = r.type==='receita';
   if(isPaid(r.id, ym)) return {cls:'ok', txt: rec?'Recebida ✓':'Paga ✓'};
-  if(ym < nowYM()) return {cls:'late', txt:'Não lançada'};
+  if(ym < nowYM()) return {cls:'late', txt: rec?'Não recebida':'Sem pagamento'};
   if(ym > nowYM()) return {cls:'warn', txt:(rec?'Cai dia ':'Vence dia ')+r.day};
   const today = new Date().getDate();
   if(r.day < today) return {cls:'late', txt:(rec?'Prevista dia ':'Venceu dia ')+r.day};
@@ -3152,8 +3270,9 @@ function renderFire(){
     <p class="muted" style="font-size:.75rem;margin-top:6px">"Investido hoje" e "renda passiva" vêm da sua carteira na aba Investimentos (${db.investments.length} ativo(s)) — renda passiva = carteira × taxa de retirada ÷ 12. Alvo = renda anual desejada ÷ taxa segura de retirada (${String(f.swr).replace('.',',')}%). Retorno de ${String(f.ret).replace('.',',')}% a.a. é <b>real</b> (acima da inflação) — valores em poder de compra de hoje. Simulação, não garantia.</p>`;
 }
 
-// ===== arquivo de dados (salvamento automático via File System Access API) =====
-let fileHandle = null, wfTimer = null;
+// ===== limpeza do recurso descontinuado de "arquivo vinculado" =====
+// O acesso direto a arquivo (File System Access API) foi removido: os dados vivem no navegador
+// + Gist. Só resta apagar a referência que versões antigas deixaram no IndexedDB.
 const idb = {
   open(){ return new Promise((res,rej)=>{ const r=indexedDB.open('gastosFS',1);
     r.onupgradeneeded=()=>r.result.createObjectStore('kv');
@@ -3162,7 +3281,6 @@ const idb = {
   async set(k,v){ const d=await this.open(); return new Promise((res,rej)=>{ const t=d.transaction('kv','readwrite').objectStore('kv').put(v,k); t.onsuccess=()=>res(); t.onerror=()=>rej(t.error); }); },
   async del(k){ const d=await this.open(); return new Promise((res,rej)=>{ const t=d.transaction('kv','readwrite').objectStore('kv').delete(k); t.onsuccess=()=>res(); t.onerror=()=>rej(t.error); }); }
 };
-const fsSupported = () => !!window.showSaveFilePicker;
 
 function showBanner(html, danger){ banner.innerHTML = html; banner.className = 'banner'+(danger?' danger':''); banner.style.display='flex'; }
 // alertas de integridade dos dados têm prioridade: nenhum outro aviso pode escondê-los
@@ -3211,77 +3329,6 @@ function resolveCorruption(){
   renderDataAlert();
 }
 
-function writeFileSoon(){ if(!fileHandle) return; clearTimeout(wfTimer); wfTimer = setTimeout(writeFile, 600); }
-async function writeFile(){
-  if(!fileHandle) return;
-  try{
-    if(await fileHandle.queryPermission({mode:'readwrite'}) !== 'granted') return;
-    const w = await fileHandle.createWritable();
-    await w.write(JSON.stringify(db, null, 1));
-    await w.close();
-  }catch(e){}
-}
-async function loadFromFile(){
-  try{
-    const f = await fileHandle.getFile();
-    const txt = await f.text();
-    if(!txt.trim()){ writeFileSoon(); return; }
-    const d = JSON.parse(txt);
-    if(d && d.accounts){
-      if((d.savedAt||'') > (db.savedAt||'')){ db = migrate(d); localStorage.setItem(KEY, JSON.stringify(db)); }
-      else if((db.savedAt||'') > (d.savedAt||'')) writeFileSoon();
-    }
-  }catch(e){}
-}
-async function linkNewFile(){
-  if(!fsSupported()) return alert('Seu navegador não suporta este recurso. Use Chrome ou Edge.');
-  try{
-    fileHandle = await showSaveFilePicker({ suggestedName:'meus-gastos-dados.json',
-      types:[{description:'Dados do Saldo', accept:{'application/json':['.json']}}] });
-    await idb.set('handle', fileHandle);
-    await writeFile();
-    hideBanner(); renderSyncUI();
-  }catch(e){}
-}
-async function linkExistingFile(){
-  if(!fsSupported()) return alert('Seu navegador não suporta este recurso. Use Chrome ou Edge.');
-  try{
-    const [h] = await showOpenFilePicker({ types:[{description:'Dados do Saldo', accept:{'application/json':['.json']}}] });
-    const txt = await (await h.getFile()).text();
-    const d = JSON.parse(txt);
-    if(!d || !d.accounts){ alert('Este arquivo não é um arquivo de dados válido.'); return; }
-    if(db.transactions.length && !confirm('Substituir os dados atuais deste navegador pelos do arquivo "'+h.name+'"?')) return;
-    if(await h.requestPermission({mode:'readwrite'}) !== 'granted') return;
-    fileHandle = h;
-    await idb.set('handle', h);
-    db = migrate(d);
-    localStorage.setItem(KEY, JSON.stringify(db));
-    hideBanner(); autoLaunchRecurring(); snapshotNW(); snapshotScore(); renderAll(); renderSyncUI();
-  }catch(e){}
-}
-async function unlinkFile(){
-  await idb.del('handle').catch(()=>{});
-  fileHandle = null;
-  renderSyncUI();
-}
-async function reconnectFile(){
-  try{
-    if(await fileHandle.requestPermission({mode:'readwrite'}) === 'granted'){
-      hideBanner();
-      await loadFromFile();
-      autoLaunchRecurring(); snapshotNW(); snapshotScore(); renderAll(); renderSyncUI();
-    }
-  }catch(e){}
-}
-function renderSyncUI(){
-  if(!document.getElementById('syncStatus')) return;
-  btnUnlink.style.display = fileHandle ? '' : 'none';
-  syncStatus.textContent = !fsSupported()
-    ? 'Recurso disponível apenas no Chrome e Edge. Enquanto isso, use o backup manual acima.'
-    : fileHandle
-      ? '✓ Vinculado a "'+fileHandle.name+'" — cada alteração é gravada automaticamente no arquivo.'
-      : 'Nenhum arquivo vinculado: os dados existem só neste navegador. Crie um arquivo de dados para ter salvamento automático.';
-}
 // aviso de backup desativado: os dados são sincronizados na nuvem (Gist), então não faz
 // mais sentido lembrar o usuário toda vez que abre o app
 function backupNag(){}
@@ -3291,7 +3338,6 @@ function backupNag(){}
 // manualmente pelo "Restaurar backup (subir JSON)" se precisar.
 async function initFS(){
   try{ await idb.del('handle'); }catch(e){}
-  fileHandle = null;
 }
 
 // ===== sincronização na nuvem (GitHub Gist privado) =====
@@ -3407,9 +3453,9 @@ async function cloudSyncNow(silent){
       db = migrate(remote);
       let repush = false;
       if(localBank && !(db.settings.bank && db.settings.bank.url)){ db.settings.bank = localBank; repush = true; }
-      try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){ storageFailed = true; }
+      persist();
       resolveCorruption(); // adotamos dados de verdade da nuvem: destrava a gravação
-      autoLaunchRecurring(); snapshotNW(); snapshotScore(); renderAll();
+      reconcileRecurring(); snapshotNW(); snapshotScore(); renderAll();
       if(repush) await cloudPush(); // envia de volta já com a config, pros outros aparelhos pegarem
     } else if((db.savedAt||'') > (remote.savedAt||'')){
       await cloudPush();
@@ -3457,10 +3503,10 @@ async function cloudJoin(){
       return;
     }
     db = migrate(remote);
-    localStorage.setItem(KEY, JSON.stringify(db));
+    persist();
     cloudCfg.lastSync = new Date().toISOString();
     saveCloudCfg();
-    autoLaunchRecurring(); snapshotNW(); snapshotScore(); renderAll(); renderCloudUI();
+    reconcileRecurring(); snapshotNW(); snapshotScore(); renderAll(); renderCloudUI();
   }catch(e){ cloudCfg = prevCfg; cloudStatus.textContent = '⚠ '+e.message; }
 }
 function cloudDisconnect(){
@@ -3495,7 +3541,7 @@ function bankCfg(){ if(!db.settings.bank) db.settings.bank = {}; return db.setti
     const old = JSON.parse(localStorage.getItem(BANK_KEY)||'null');
     if(old && old.url && old.token && !(db.settings.bank && db.settings.bank.url)){
       db.settings.bank = {url:old.url, token:old.token};
-      localStorage.setItem(KEY, JSON.stringify(db));
+      persist();
     }
     localStorage.removeItem(BANK_KEY);
   }catch(e){}
@@ -4068,6 +4114,7 @@ function commitImport(){
     });
   }
   capImportIds();
+  reconcileRecurring();   // o extrato pode trazer o pagamento de contas fixas em aberto
   save();
   dlgImport.close();
   alert(n+' de '+impRows.length+' lançamento(s) importado(s) com sucesso.');
@@ -4145,7 +4192,12 @@ function renderDash(){
   dForecastSummary.innerHTML = `<strong class="${projFinal>=fc.pts[0]?'pos':'neg'}">${fmt(projFinal)}</strong> projetado para ${lastLabel} se mantiver o ritmo atual.`;
 
   // subtítulos dos cards (padrão do design)
-  dTotalSub.textContent = 'em '+db.accounts.length+' conta'+(db.accounts.length>1?'s':'');
+  // o saldo não desconta contas fixas previstas (elas só entram quando pagas de verdade),
+  // então dizemos aqui quanto ainda deve sair, senão o número engana
+  const pf = pendingFixed(nowYM());
+  dTotalSub.textContent = pf.desp
+    ? '− '+fmt(pf.desp)+' em fixas a pagar'
+    : 'em '+db.accounts.length+' conta'+(db.accounts.length>1?'s':'');
   const ant = monthTotals(prevYM(viewYM));
   const mesAnt = monthName(prevYM(viewYM)).split(' ')[0].toLowerCase();
   const cmpSub = (cur, prev, goodWhenUp) => {
@@ -4222,7 +4274,12 @@ function renderDash(){
       <div class="grow"><div class="t1" style="font-size:.85rem">${esc(r.name)}</div></div>
       <span class="amt ${r.type==='receita'?'pos':''}" style="font-size:.82rem">${r.type==='receita'?'+ ':''}${fmt(r.amount)}</span>
     </div>`).join('')
-    : '<div class="empty">Nenhuma conta pendente</div>';
+      + (()=>{ const pf=pendingFixed(viewYM); return pf.desp
+          ? `<div class="row" style="padding:8px 0 0;border-top:1px solid var(--line);margin-top:4px">
+               <div class="grow"><div class="t2">Previsto, ainda não saiu do saldo</div></div>
+               <span class="amt" style="font-size:.82rem">${fmt(pf.desp)}</span></div>`
+          : ''; })()
+    : '<div class="empty">Tudo conciliado neste mês</div>';
 
   // orçamentos resumo
   dBudgets.innerHTML = renderBudgetRows() || '<div class="empty">Defina limites na aba Orçamento.</div>';
@@ -4245,7 +4302,7 @@ function renderTx(){
   list.sort((a,b)=>b.date.localeCompare(a.date));
 
   // agrupado por dia, no estilo do mockup ("HOJE · 21 JUL" / "ONTEM · 20 JUL")
-  const hoje = todayISO(), ontem = (()=>{ const d=new Date(); d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); })();
+  const hoje = todayISO(), ontem = isoAdd(hoje, -1); // isoAdd usa meio-dia: não escorrega de fuso
   const dayLabel = iso => {
     const d = new Date(iso+'T12:00:00');
     const dm = d.getDate()+' '+d.toLocaleDateString('pt-BR',{month:'short'}).replace('.','');
@@ -4321,6 +4378,7 @@ function renderRec(){
   const list = [...db.recurring].sort((a,b)=>a.day-b.day);
   const totD = list.filter(r=>r.type!=='receita').reduce((s,r)=>s+r.amount,0);
   const totR = list.filter(r=>r.type==='receita').reduce((s,r)=>s+r.amount,0);
+  const pend = pendingFixed(viewYM);
   // tabela no estilo do mockup: CONTA | VENCIMENTO | VALOR | STATUS (+ ações nossas)
   recList.innerHTML = list.length
     ? `<div class="thead"><span style="flex:1">Conta</span><span style="width:100px">Vencimento</span><span style="width:130px;text-align:right">Valor</span><span style="width:100px;text-align:center">Status</span><span style="width:130px"></span></div>`
@@ -4328,18 +4386,26 @@ function renderRec(){
       const s = recStatus(r, viewYM);
       const paid = isPaid(r.id, viewYM);
       const rec = r.type==='receita';
+      const mtx = recMatchedTx(r.id, viewYM);
+      // quando a baixa veio de um lançamento real, mostra qual foi — dá pra conferir e desfazer
+      const origem = paid && mtx
+        ? `<div class="t2" style="color:var(--green)">${rec?'recebido':'pago'} ${fmtDate(mtx.date)} · ${esc(mtx.desc||'sem descrição')}</div>`
+        : '';
       return `<div class="trow">
-        <div style="flex:1;display:flex;align-items:center;gap:10px;min-width:0">${r.stream?streamIcon(r.stream):''}<div style="min-width:0"><div class="t1">${esc(r.name)}</div><div class="t2">${esc(r.cat)}${r.auto?' · automático ↻':''}</div></div></div>
+        <div style="flex:1;display:flex;align-items:center;gap:10px;min-width:0">${r.stream?streamIcon(r.stream):''}<div style="min-width:0"><div class="t1">${esc(r.name)}</div><div class="t2">${esc(r.cat)}</div>${origem}</div></div>
         <span style="width:100px;font-size:.85rem;color:var(--muted)">dia ${String(r.day).padStart(2,'0')}</span>
         <span class="amt ${rec?'pos':''}" style="width:130px;text-align:right">${rec?'+ ':''}${fmt(r.amount)}</span>
         <span style="width:100px;text-align:center"><span class="pill ${s.cls}">${s.txt}</span></span>
-        <span style="width:130px;display:flex;gap:4px;justify-content:flex-end">${paid?'':`<button class="btn sm" onclick="payRec('${r.id}')">Lançar</button>`}<button class="btn danger" onclick="delRec('${r.id}')" title="Excluir">✕</button></span>
+        <span style="width:130px;display:flex;gap:4px;justify-content:flex-end">${paid
+          ? `<button class="btn sm" onclick="unmatchRec('${r.id}','${viewYM}')" title="Marcar como não ${rec?'recebida':'paga'} de novo">Desfazer</button>`
+          : `<button class="btn sm" onclick="payRec('${r.id}')">${rec?'Recebi':'Paguei'}</button>`}<button class="btn danger" onclick="delRec('${r.id}')" title="Excluir">✕</button></span>
       </div>`;
     }).join('')
     + `<div class="trow"><div style="flex:1"><b>Receitas fixas</b></div><span class="amt pos">+ ${fmt(totR)}</span></div>`
     + `<div class="trow"><div style="flex:1"><b>Despesas fixas</b></div><span class="amt neg">− ${fmt(totD)}</span></div>`
     + `<div class="trow"><div style="flex:1"><b>Sobra fixa do mês</b></div><span class="amt ${totR-totD>=0?'pos':'neg'}">${fmt(totR-totD)}</span></div>`
-    : '<div class="empty">Cadastre salário, aluguel, luz, streaming... Itens automáticos são lançados sozinhos todo mês.</div>';
+    + `<div class="trow" style="border:0"><div class="t2" style="flex:1">Contas fixas são <b>previsão</b>: não mexem no seu saldo. Quando o pagamento aparece no extrato (ou você importa/lança), o app reconhece sozinho e marca aqui.${pend.desp||pend.rec?` Ainda em aberto neste mês: <b>${fmt(pend.desp)}</b> a pagar${pend.rec?` e <b>${fmt(pend.rec)}</b> a receber`:''}.`:' Tudo deste mês já foi conciliado.'}</div></div>`
+    : '<div class="empty">Cadastre salário, aluguel, luz, streaming... Elas ficam como previsão e o app marca como paga quando reconhecer o pagamento no seu extrato.</div>';
 }
 
 // (módulo Metas removido a pedido — os dados db.goals são preservados nos backups)
@@ -4367,12 +4433,12 @@ window.addEventListener('error', e => reportUnexpected(e.message));
 window.addEventListener('unhandledrejection', e => reportUnexpected(e.reason && e.reason.message || e.reason));
 
 txInst.innerHTML = Array.from({length:24},(_,i)=>`<option value="${i+1}">${i+1}x${i?'':' (à vista)'}</option>`).join('');
-autoLaunchRecurring();
+reconcileRecurring();
 snapshotNW();
 snapshotScore();
 // não grava por cima do original quando a leitura falhou: ele ainda pode ser a única cópia
 if(!saveBlocked){
-  try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){ storageFailed = true; }
+  persist();
 }
 renderAll();
 goTab('dash');
