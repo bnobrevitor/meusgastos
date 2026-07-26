@@ -1,3 +1,5 @@
 .claude/
+# *.json fica de fora porque os dados pessoais (meus-gastos-dados.json) moram aqui
 *.json
 !package.json
+!manifest.json

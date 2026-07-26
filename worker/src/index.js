@@ -163,7 +163,7 @@ async function callClaude(system, question, apiKey) {
       max_tokens: 1536,
       system: system || '',
       messages: [{ role: 'user', content: question || '' }],
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }],
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
     }),
   });
   if (!r.ok) {
@@ -175,6 +175,24 @@ async function callClaude(system, question, apiKey) {
   const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   if (!text) throw new Error('Claude não retornou texto (possível recusa por segurança)');
   return text;
+}
+
+// ===== teto de custo do /agent =====
+// A chave da Anthropic é cobrada por uso e o token compartilhado hoje viaja junto com os dados
+// sincronizados (Gist cifrado e backup JSON). Se um backup vazar, sem teto alguém poderia
+// gastar a chave à vontade. Um contador diário no KV limita o pior caso.
+// Degrada com elegância: sem o binding AGENT_LIMITS, o Worker segue funcionando sem teto.
+const AGENT_DEFAULT_DAILY_LIMIT = 50;
+
+async function checkAgentQuota(env) {
+  if (!env.AGENT_LIMITS) return { ok: true };
+  const limit = Number(env.AGENT_DAILY_LIMIT) || AGENT_DEFAULT_DAILY_LIMIT;
+  const key = 'agent:' + new Date().toISOString().slice(0, 10);
+  const used = Number(await env.AGENT_LIMITS.get(key)) || 0;
+  if (used >= limit) return { ok: false, used, limit };
+  // expira em 48h — o contador do dia seguinte começa do zero sozinho, sem limpeza manual
+  await env.AGENT_LIMITS.put(key, String(used + 1), { expirationTtl: 172800 });
+  return { ok: true, used: used + 1, limit };
 }
 
 // ===== handler =====
@@ -199,6 +217,10 @@ async function handleRequest(request, env) {
     }
     if (!env.ANTHROPIC_API_KEY) {
       return json({ error: 'Worker sem ANTHROPIC_API_KEY configurada (secret ausente)' }, 500);
+    }
+    const quota = await checkAgentQuota(env);
+    if (!quota.ok) {
+      return json({ error: 'Limite diário de perguntas à IA atingido (' + quota.limit + '). Tente de novo amanhã.' }, 429);
     }
     try {
       const body = await request.json();

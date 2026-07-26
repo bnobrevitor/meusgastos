@@ -2,6 +2,12 @@ name = "saldo-bank-sync"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 
+# Contador diário de perguntas à IA (/agent) — teto de custo da chave da Anthropic.
+# Limite padrão: 50/dia. Pra mudar: wrangler secret put AGENT_DAILY_LIMIT
+[[kv_namespaces]]
+binding = "AGENT_LIMITS"
+id = "abcc74b36ee2454da1d54faa363d9d5b"
+
 # Segredos (nunca ficam aqui, nunca em texto no repositório):
 #   wrangler secret put PLUGGY_CLIENT_ID
 #   wrangler secret put PLUGGY_CLIENT_SECRET

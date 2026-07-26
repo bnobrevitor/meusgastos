@@ -144,6 +144,53 @@ async function run() {
   const ctErrBody = await r.json();
   chk('connect-token com erro da Pluggy = 502 com mensagem detalhada', r.status === 502 && ctErrBody.error.includes('não autorizado a criar'));
 
+  // ---- /agent: teto diário de custo ----
+  // KV falso em memória, só com o que checkAgentQuota usa (get/put)
+  const fakeKV = (store = new Map()) => ({
+    store,
+    get: async k => (store.has(k) ? store.get(k) : null),
+    put: async (k, v) => { store.set(k, v); },
+  });
+  global.fetch = async () => Response.json({ content: [{ type: 'text', text: 'resposta da IA' }] });
+
+  const envAgent = { SHARED_TOKEN: 'abc', ANTHROPIC_API_KEY: 'fake' };
+  const agentReq = () => req('/agent', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer abc', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ system: 's', question: 'q' }),
+  });
+
+  // sem binding de KV o Worker segue funcionando (degrada sem teto, não quebra)
+  r = await worker.fetch(agentReq(), envAgent);
+  chk('/agent sem KV configurado continua funcionando', r.status === 200);
+
+  // token errado é barrado ANTES de consumir cota (senão qualquer um esgotaria o limite alheio)
+  const kvAuth = fakeKV();
+  r = await worker.fetch(req('/agent', { method: 'POST', headers: { Authorization: 'Bearer errado' } }),
+    { ...envAgent, AGENT_LIMITS: kvAuth });
+  chk('/agent com token errado = 401', r.status === 401);
+  chk('/agent com token errado não consome cota', kvAuth.store.size === 0, kvAuth.store.size);
+
+  // limite de 2/dia: 2 passam, a 3ª é barrada
+  const kv = fakeKV();
+  const envLim = { ...envAgent, AGENT_LIMITS: kv, AGENT_DAILY_LIMIT: '2' };
+  const s1 = (await worker.fetch(agentReq(), envLim)).status;
+  const s2 = (await worker.fetch(agentReq(), envLim)).status;
+  const r3 = await worker.fetch(agentReq(), envLim);
+  const b3 = await r3.json();
+  chk('/agent 1ª pergunta dentro do limite = 200', s1 === 200, s1);
+  chk('/agent 2ª pergunta dentro do limite = 200', s2 === 200, s2);
+  chk('/agent 3ª pergunta estoura o limite = 429', r3.status === 429, r3.status);
+  chk('/agent mensagem de limite cita o teto', /Limite diário/.test(b3.error || '') && b3.error.includes('2'), b3.error);
+  chk('/agent contador guardado na chave do dia', kv.store.has('agent:' + new Date().toISOString().slice(0, 10)));
+  chk('/agent contador não passa do limite', Number(kv.store.get('agent:' + new Date().toISOString().slice(0, 10))) === 2);
+
+  // o contador é por dia: chave de ontem cheia não afeta hoje
+  const ontem = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const kvOntem = fakeKV(new Map([['agent:' + ontem, '999']]));
+  r = await worker.fetch(agentReq(), { ...envAgent, AGENT_LIMITS: kvOntem, AGENT_DAILY_LIMIT: '2' });
+  chk('/agent limite de ontem não bloqueia hoje', r.status === 200, r.status);
+
   global.fetch = origFetch;
 
   const falhas = T.filter(t => !t[1]);
