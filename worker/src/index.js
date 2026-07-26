@@ -24,15 +24,27 @@ function json(data, status = 200) {
 
 // Transação no formato da Pluggy -> linha no formato que a tela de revisão do Saldo já espera
 // (o mesmo {kind:'tx', date, desc, amount, type} usado pelo importador de OFX/CSV/PDF)
-function mapPluggyTransaction(t) {
+// A conta de origem viaja junto: sem isso o app jogava compras do cartão e movimentos da
+// conta corrente todos no mesmo lugar — e o pagamento da fatura virava uma despesa duplicada
+// (a compra já tinha sido contada). accountType 'CREDIT' é o que identifica cartão na Pluggy.
+function mapPluggyTransaction(t, acc) {
   const amount = Math.abs(Number(t.amount) || 0);
   const type = t.type === 'CREDIT' ? 'receita' : 'despesa';
   const date = String(t.date || '').slice(0, 10);
-  return { kind: 'tx', date, desc: t.description || '', amount, type, pluggyId: t.id };
+  return {
+    kind: 'tx', date, desc: t.description || '', amount, type, pluggyId: t.id,
+    accountId: acc ? acc.id : (t.accountId || null),
+    accountName: acc ? accountLabel(acc) : null,
+    accountType: acc ? (acc.type || null) : null,
+  };
+}
+
+function accountLabel(a) {
+  return a.name || a.marketingName || 'Conta';
 }
 
 function mapPluggyAccount(a) {
-  return { id: a.id, nome: a.name || a.marketingName || 'Conta', saldo: a.balance };
+  return { id: a.id, nome: accountLabel(a), saldo: a.balance, tipo: a.type || null };
 }
 
 // comparação em tempo constante — evita vazar o token por diferença de tempo de resposta
@@ -135,7 +147,7 @@ async function fetchAllBankData(env) {
     for (const acc of accs) {
       accounts.push(mapPluggyAccount(acc));
       const txs = await fetchTransactionsSince(acc.id, apiKey, from);
-      for (const t of txs) transactions.push(mapPluggyTransaction(t));
+      for (const t of txs) transactions.push(mapPluggyTransaction(t, acc));
     }
   }
   return { accounts, transactions };

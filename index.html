@@ -849,7 +849,15 @@
 
     <div id="impAccWrap" style="display:none">
       <label>Lançar na conta</label>
-      <select id="impAcc"></select>
+      <select id="impAcc" onchange="impAccChanged()"></select>
+    </div>
+    <!-- sincronização bancária: cada conta do banco vai pra uma conta do app (o mapeamento
+         fica salvo, então só se faz uma vez). Sem isso, compras do cartão e movimentos da
+         conta corrente caíam no mesmo lugar e o pagamento da fatura duplicava a despesa. -->
+    <div id="impMapWrap" style="display:none">
+      <label>De qual conta do app é cada conta do banco</label>
+      <div id="impMapList"></div>
+      <p class="muted" style="font-size:.78rem;margin:6px 0 0">Cadastre o cartão como conta do tipo <b>cartão de crédito</b>: assim as compras formam a fatura e o pagamento vira transferência, sem contar a despesa duas vezes.</p>
     </div>
 
     <div id="impReview" style="display:none">
@@ -964,6 +972,8 @@ function migrate(d){
   if(!d.recurringPaid) d.recurringPaid = {};
   // vínculo conta fixa -> lançamento real que a quitou: {'2026-07': {recId: txId}}
   if(!d.recurringMatch) d.recurringMatch = {};
+  // qual conta do app corresponde a cada conta do banco: {pluggyAccountId: appAccountId}
+  if(!d.settings.bankAccMap) d.settings.bankAccMap = {};
   if(!d.assetsFixed) d.assetsFixed = [];
   if(!d.debts) d.debts = [];
   if(!d.nwHistory) d.nwHistory = {};
@@ -4020,6 +4030,80 @@ function applyCsvMapping(){
   impCsvMap.style.display = 'none';
   startReview(rows);
 }
+// ===== cartão de crédito: fatura não é despesa nova =====
+// A compra no cartão já é a despesa. O pagamento da fatura é só dinheiro saindo da conta
+// corrente pra quitar o cartão — contá-lo de novo dobrava tudo. Vira transferência.
+const FATURA_RE = /PAG(AMENTO|TO|\.)?\s*(DE\s*)?(FATURA|CARTAO|CART[ÃA]O)|FATURA\s*CART|PAGAMENTO\s*RECEBIDO|PAGTO\s*DEBITO\s*AUTOM/i;
+function ehPagamentoFatura(desc){ return FATURA_RE.test(desc||''); }
+function contasCartao(){ return db.accounts.filter(a=>a.type==='cartao'); }
+// conta do app escolhida pra cada conta do banco (fica salvo entre sincronizações)
+function bankAccMap(){ if(!db.settings.bankAccMap) db.settings.bankAccMap={}; return db.settings.bankAccMap; }
+function impAccOf(r){
+  if(r.accountId) return bankAccMap()[r.accountId] || '';
+  return impAcc ? impAcc.value : '';
+}
+// Decide o que cada linha vira: lançamento normal, transferência (pagamento de fatura saindo
+// da conta corrente) ou descarte (a outra ponta do mesmo pagamento, vista de dentro do cartão).
+function classifyImpRows(){
+  const cartoes = contasCartao();
+  for(const r of impRows){
+    if(r.kind!=='tx') continue;
+    r.accApp = impAccOf(r);
+    const destino = db.accounts.find(a=>a.id===r.accApp);
+    r.op = 'normal'; r.toAcc = null; r.motivo = null;
+    if(!ehPagamentoFatura(r.desc) || !destino) continue;
+    if(destino.type==='cartao' && r.type==='receita'){
+      // crédito que entra no cartão quitando a fatura: é a outra ponta da transferência
+      r.op = 'skip'; r.include = false;
+      r.motivo = 'outra ponta do pagamento da fatura';
+    } else if(destino.type!=='cartao' && r.type==='despesa'){
+      r.op = 'transf';
+      // com um cartão só já sabemos o destino; com vários, o usuário escolhe na linha
+      r.toAcc = cartoes.length===1 ? cartoes[0].id : '';
+      r.motivo = cartoes.length
+        ? 'pagamento de fatura'
+        : 'pagamento de fatura — cadastre o cartão como conta primeiro';
+    }
+  }
+}
+// mapeamento "conta do banco -> conta do app", uma linha por conta que veio na sincronização
+function renderImpMap(){
+  const contas = [];
+  for(const r of impRows){
+    if(r.accountId && !contas.some(c=>c.id===r.accountId))
+      contas.push({id:r.accountId, nome:r.accountName||'Conta', cartao:r.accountType==='CREDIT'});
+  }
+  if(!contas.length){ impMapWrap.style.display='none'; return false; }
+  const mapa = bankAccMap();
+  impMapList.innerHTML = contas.map(c=>{
+    // sugere sozinho: cartão do banco -> primeira conta do app do tipo cartão
+    if(!mapa[c.id]){
+      const alvo = c.cartao ? contasCartao()[0] : db.accounts.find(a=>a.type!=='cartao');
+      if(alvo) mapa[c.id] = alvo.id;
+    }
+    const opts = db.accounts.map(a=>
+      '<option value="'+a.id+'"'+(mapa[c.id]===a.id?' selected':'')+'>'+esc(a.name)+(a.type==='cartao'?' (cartão)':'')+'</option>').join('');
+    return '<div class="row" style="padding:6px 0">'
+      + '<div class="grow"><div class="t1">'+esc(c.nome)+'</div><div class="t2">'
+      + (c.cartao?'cartão de crédito no banco':'conta no banco')+'</div></div>'
+      + '<select onchange="setImpMap(\''+c.id+'\', this.value)" style="max-width:190px">'+opts+'</select>'
+      + '</div>';
+  }).join('');
+  impMapWrap.style.display='';
+  return true;
+}
+// trocar a conta de destino (arquivos OFX/CSV/PDF) reclassifica: o que é pagamento de fatura
+// depende de qual conta recebe as linhas
+function impAccChanged(){
+  if(!impRows || !impRows.length) return;
+  classifyImpRows();
+  renderImportReview();
+}
+function setImpMap(bankId, appId){
+  bankAccMap()[bankId] = appId;
+  classifyImpRows();
+  renderImportReview();
+}
 function startReview(rows){
   // linhas vindas da sincronização bancária trazem um pluggyId estável — se já foram
   // importadas antes (mesmo em outra sincronização), nem mostra de novo na revisão
@@ -4035,8 +4119,14 @@ function startReview(rows){
     return;
   }
   impFileStatus.textContent = jaImportadas ? `${jaImportadas} lançamento(s) já importado(s) antes foram ignorados automaticamente.` : '';
-  if(impRows[0].kind==='tx'){ impAccWrap.style.display=''; fillAccSelect(impAcc); }
-  else impAccWrap.style.display='none';
+  if(impRows[0].kind==='tx'){
+    // com dados do banco cada linha já sabe sua conta de origem: mostra o mapeamento
+    // e esconde o seletor único, que misturaria cartão com conta corrente
+    const temMapa = renderImpMap();
+    impAccWrap.style.display = temMapa ? 'none' : '';
+    if(!temMapa) fillAccSelect(impAcc);
+    classifyImpRows();
+  } else { impAccWrap.style.display='none'; impMapWrap.style.display='none'; }
   renderImportReview();
   impReview.style.display=''; impCommitBtn.style.display='';
 }
@@ -4046,15 +4136,31 @@ function renderImportReview(){
     impTableWrap.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:.82rem">'+
       '<thead><tr><th style="padding:6px"></th><th style="padding:6px;text-align:left">Data</th><th style="padding:6px;text-align:left">Descrição</th>'+
       '<th style="padding:6px">Tipo</th><th style="padding:6px">Categoria</th><th style="padding:6px;text-align:right">Valor</th></tr></thead><tbody>'+
-      impRows.map((r,i)=>`<tr style="border-top:1px solid var(--line)">
+      impRows.map((r,i)=>{
+        const selT = v => r.op==='transf' ? (v==='transf'?'selected':'') : (r.type===v?'selected':'');
+        // 3ª coluna: destino quando é transferência, categoria quando é lançamento normal
+        const destino = r.op==='transf'
+          ? '<select id="impTo'+i+'">'+(r.toAcc?'':'<option value="">— escolha o cartão —</option>')
+            + db.accounts.filter(a=>a.id!==r.accApp).map(a=>'<option value="'+a.id+'"'+(r.toAcc===a.id?' selected':'')+'>'+esc(a.name)+'</option>').join('')
+            + '</select>'
+          : '<select id="impCat'+i+'"></select>';
+        const aviso = r.motivo
+          ? '<div class="pill '+(r.op==='skip'?'late':'warn')+'" style="margin-top:3px;display:inline-block">'+r.motivo+'</div>'
+          : '';
+        return `<tr style="border-top:1px solid var(--line)${r.op==='skip'?';opacity:.55':''}">
         <td style="padding:6px;text-align:center"><input type="checkbox" id="impChk${i}" ${r.include?'checked':''}></td>
         <td style="padding:6px"><input type="date" id="impDate${i}" value="${r.date}" style="width:135px"></td>
-        <td style="padding:6px"><input type="text" id="impDesc${i}" value="${esc(r.desc)}" style="width:100%;min-width:160px">${r.dup?'<div class="pill late" style="margin-top:3px;display:inline-block">possível duplicata</div>':''}</td>
-        <td style="padding:6px"><select id="impType${i}" onchange="impRetypeCat(${i})"><option value="despesa" ${r.type==='despesa'?'selected':''}>Despesa</option><option value="receita" ${r.type==='receita'?'selected':''}>Receita</option></select></td>
-        <td style="padding:6px"><select id="impCat${i}"></select></td>
+        <td style="padding:6px"><input type="text" id="impDesc${i}" value="${esc(r.desc)}" style="width:100%;min-width:160px">${r.dup?'<div class="pill late" style="margin-top:3px;display:inline-block">possível duplicata</div>':''}${aviso}</td>
+        <td style="padding:6px"><select id="impType${i}" onchange="impRetypeCat(${i})"><option value="despesa" ${selT('despesa')}>Despesa</option><option value="receita" ${selT('receita')}>Receita</option><option value="transf" ${r.op==='transf'?'selected':''}>Transferência</option></select></td>
+        <td style="padding:6px">${destino}</td>
         <td style="padding:6px;text-align:right;white-space:nowrap">${fmt(r.amount)}</td>
-      </tr>`).join('')+'</tbody></table>';
-    impRows.forEach((r,i)=>{ fillCatSelect(document.getElementById('impCat'+i), r.type==='receita'?CATS_R:CATS_D); document.getElementById('impCat'+i).value = r.cat; });
+      </tr>`;}).join('')+'</tbody></table>';
+    impRows.forEach((r,i)=>{
+      const sel = document.getElementById('impCat'+i);
+      if(!sel) return;   // linha de transferência não tem categoria
+      fillCatSelect(sel, r.type==='receita'?CATS_R:CATS_D);
+      sel.value = r.cat;
+    });
   } else {
     impTableWrap.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:.82rem">'+
       '<thead><tr><th style="padding:6px"></th><th style="padding:6px;text-align:left">Data</th><th style="padding:6px;text-align:left">Ativo</th>'+
@@ -4071,8 +4177,18 @@ function renderImportReview(){
 }
 function impRetypeCat(i){
   const type = document.getElementById('impType'+i).value;
+  const r = impRows[i];
+  // virar//deixar de ser transferência troca a 3ª coluna (destino x categoria): redesenha
+  if((type==='transf') !== (r.op==='transf')){
+    r.op = type==='transf' ? 'transf' : 'normal';
+    if(type!=='transf'){ r.type = type; r.motivo = null; }
+    else if(!r.toAcc){ const c = contasCartao(); r.toAcc = c.length===1 ? c[0].id : ''; }
+    renderImportReview();
+    return;
+  }
+  r.type = type;
   const sel = document.getElementById('impCat'+i);
-  fillCatSelect(sel, type==='receita'?CATS_R:CATS_D);
+  if(sel) fillCatSelect(sel, type==='receita'?CATS_R:CATS_D);
 }
 function impToggleAll(v){
   impRows.forEach((r,i)=>{ const el=document.getElementById('impChk'+i); if(el) el.checked=v; });
@@ -4087,18 +4203,32 @@ function commitImport(){
   if(!impRows.length) return;
   let n = 0;
   if(impRows[0].kind==='tx'){
-    const acc = impAcc.value;
+    let pulados = 0;
     impRows.forEach((r,i)=>{
       if(!document.getElementById('impChk'+i).checked) return;
       const date = document.getElementById('impDate'+i).value;
       const desc = document.getElementById('impDesc'+i).value.trim();
       const type = document.getElementById('impType'+i).value;
-      const cat = document.getElementById('impCat'+i).value;
-      if(!date) return;
-      db.transactions.push({id:uid(), type, amount:r.amount, desc, cat, acc, toAcc:null, date});
+      // cada linha vai pra conta do app mapeada à sua conta de origem no banco
+      const acc = r.accApp || impAcc.value;
+      if(!date || !acc) return;
+      if(type==='transf'){
+        const to = document.getElementById('impTo'+i).value;
+        if(!to || to===acc){ pulados++; return; }   // sem destino não dá pra transferir
+        db.transactions.push({id:uid(), type:'transf', amount:r.amount, desc, cat:'Transferência', acc, toAcc:to, date});
+      } else {
+        const catSel = document.getElementById('impCat'+i);
+        db.transactions.push({id:uid(), type, amount:r.amount, desc, cat: catSel?catSel.value:'Outros', acc, toAcc:null, date});
+      }
       if(r.pluggyId) db.importedBankTxIds.push(r.pluggyId);
       n++;
     });
+    // pagamentos de fatura descartados também ficam registrados: não voltam na próxima sincronização
+    impRows.forEach(r=>{ if(r.op==='skip' && r.pluggyId && !db.importedBankTxIds.includes(r.pluggyId)) db.importedBankTxIds.push(r.pluggyId); });
+    if(pulados) alert(pulados+' pagamento(s) de fatura não foram importados por não ter cartão de destino.\n\n'
+      + (contasCartao().length
+          ? 'Escolha o cartão na coluna de destino e importe de novo.'
+          : 'Cadastre seu cartão como uma conta do tipo "cartão de crédito" (Ajustes → Contas e cartões) e sincronize de novo. Assim as compras formam a fatura e o pagamento não conta como despesa duas vezes.'));
   } else {
     impRows.forEach((r,i)=>{
       if(!document.getElementById('impChk'+i).checked) return;

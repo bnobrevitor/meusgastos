@@ -17,6 +17,16 @@ chk('amount ausente/inválido não quebra (vira 0)', mapPluggyTransaction({ id: 
 chk('conta com name usa name', mapPluggyAccount({ id: 'a1', name: 'Conta Corrente', balance: 1500.5 }).nome === 'Conta Corrente');
 chk('conta sem name cai pro marketingName', mapPluggyAccount({ id: 'a2', marketingName: 'Nubank', balance: 200 }).nome === 'Nubank');
 chk('conta sem nenhum nome usa fallback', mapPluggyAccount({ id: 'a3', balance: 0 }).nome === 'Conta');
+// conta de origem viaja junto com a transacao (sem isso o app mistura cartao e corrente)
+const accCC = { id: 'acc-cc', name: 'Cartao Platinum', type: 'CREDIT', balance: -1200 };
+const accCor = { id: 'acc-1', name: 'Conta Corrente', type: 'BANK', balance: 5000 };
+const tCard = mapPluggyTransaction({ id: 'p1', date: '2026-07-10', description: 'MERCADO', amount: 90, type: 'DEBIT' }, accCC);
+chk('transacao carrega o id da conta de origem', tCard.accountId === 'acc-cc', tCard.accountId);
+chk('transacao carrega o nome da conta', tCard.accountName === 'Cartao Platinum');
+chk('transacao marca cartao como CREDIT', tCard.accountType === 'CREDIT');
+chk('conta corrente marcada como BANK', mapPluggyTransaction({ id: 'p2', date: '2026-07-10', description: 'PAGAMENTO FATURA', amount: 1200, type: 'DEBIT' }, accCor).accountType === 'BANK');
+chk('sem conta informada nao quebra', mapPluggyTransaction({ id: 'p3', date: '2026-07-01', amount: 5, type: 'DEBIT' }).accountId === null);
+chk('conta mapeada expoe o tipo', mapPluggyAccount(accCC).tipo === 'CREDIT');
 chk('saldo preservado', mapPluggyAccount({ id: 'a4', name: 'X', balance: -300.25 }).saldo === -300.25);
 
 // ---- isAuthorized ----
