@@ -4074,6 +4074,12 @@ function renderImpMap(){
       contas.push({id:r.accountId, nome:r.accountName||'Conta', cartao:r.accountType==='CREDIT'});
   }
   if(!contas.length){ impMapWrap.style.display='none'; return false; }
+  // Conta do banco sem nenhum movimento no período não aparece nos lançamentos — mas precisa
+  // estar aqui, senão fica impossível mapeá-la e ela some da tela sem explicação.
+  for(const a of lastBankAccounts){
+    if(!contas.some(c=>c.id===a.id))
+      contas.push({id:a.id, nome:a.nome||'Conta', cartao:a.tipo==='CREDIT', semMovimento:true});
+  }
   const mapa = bankAccMap();
   impMapList.innerHTML = contas.map(c=>{
     // sugere sozinho: cartão do banco -> primeira conta do app do tipo cartão
@@ -4085,7 +4091,8 @@ function renderImpMap(){
       '<option value="'+a.id+'"'+(mapa[c.id]===a.id?' selected':'')+'>'+esc(a.name)+(a.type==='cartao'?' (cartão)':'')+'</option>').join('');
     return '<div class="row" style="padding:6px 0">'
       + '<div class="grow"><div class="t1">'+esc(c.nome)+'</div><div class="t2">'
-      + (c.cartao?'cartão de crédito no banco':'conta no banco')+'</div></div>'
+      + (c.cartao?'cartão de crédito no banco':'conta no banco')
+      + (c.semMovimento?' · sem movimento no período':'')+'</div></div>'
       + '<select onchange="setImpMap(\''+c.id+'\', this.value)" style="max-width:190px">'+opts+'</select>'
       + '</div>';
   }).join('');
