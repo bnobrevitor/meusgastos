@@ -4296,7 +4296,12 @@ function renderAll(){
 }
 
 function renderDash(){
-  const total = db.accounts.reduce((s,a)=>s+accBalance(a),0);
+  // "Saldo disponível" é o dinheiro que você TEM — só contas, sem cartão. Somar o cartão aqui
+  // subtraía a fatura em aberto do saldo, e o número deixava de bater com o extrato do banco.
+  // A fatura não some: aparece logo abaixo como compromisso, e no Patrimônio como dívida.
+  const total = db.accounts.filter(a=>a.type!=='cartao').reduce((s,a)=>s+accBalance(a),0);
+  const fatura = db.accounts.filter(a=>a.type==='cartao')
+    .reduce((s,a)=>s+Math.max(0, -accBalance(a)), 0);
   const {inc,exp} = monthTotals(viewYM);
   dTotal.textContent = fmt(total);
   dTotal.className = 'val ' + (total<0?'neg':'');
@@ -4329,12 +4334,16 @@ function renderDash(){
   dForecastSummary.innerHTML = `<strong class="${projFinal>=fc.pts[0]?'pos':'neg'}">${fmt(projFinal)}</strong> projetado para ${lastLabel} se mantiver o ritmo atual.`;
 
   // subtítulos dos cards (padrão do design)
-  // o saldo não desconta contas fixas previstas (elas só entram quando pagas de verdade),
-  // então dizemos aqui quanto ainda deve sair, senão o número engana
+  // o saldo mostra só o que você tem; o que ainda deve sair (fatura do cartão e contas fixas
+  // previstas) vem aqui embaixo, senão o número de cima engana
   const pf = pendingFixed(nowYM());
-  dTotalSub.textContent = pf.desp
-    ? '− '+fmt(pf.desp)+' em fixas a pagar'
-    : 'em '+db.accounts.length+' conta'+(db.accounts.length>1?'s':'');
+  const compromissos = [];
+  if(fatura) compromissos.push(fmt(fatura)+' de fatura');
+  if(pf.desp) compromissos.push(fmt(pf.desp)+' em fixas');
+  const nConta = db.accounts.filter(a=>a.type!=='cartao').length;
+  dTotalSub.textContent = compromissos.length
+    ? '− '+compromissos.join(' + ')+' a pagar'
+    : 'em '+nConta+' conta'+(nConta===1?'':'s');
   const ant = monthTotals(prevYM(viewYM));
   const mesAnt = monthName(prevYM(viewYM)).split(' ')[0].toLowerCase();
   const cmpSub = (cur, prev, goodWhenUp) => {
