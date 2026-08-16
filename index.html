@@ -322,6 +322,9 @@
     <div class="pagedate" id="pageDate"></div>
   </div>
   <div id="banner" class="banner" style="display:none"></div>
+  <!-- aviso da sincronização automática: elemento próprio pra não disputar espaço com o
+       #banner, que é reservado a alertas de integridade dos dados -->
+  <div id="bankNotice" class="banner" style="display:none;background:var(--green-bg);border-color:var(--green);color:#14503B"></div>
   <!-- DASHBOARD -->
   <section class="tab on" id="tab-dash">
     <div class="cards cards4">
@@ -935,6 +938,14 @@
       <button type="button" class="btn sm" onclick="connectBank()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg> Conectar/reconectar banco</button>
       <button type="button" class="btn sm danger" onclick="bankShowSetup()">Trocar / remover</button>
     </div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px">
+      <label class="chk" style="color:var(--text)"><input type="checkbox" id="autoSyncChk" onchange="autoSyncToggle()"> Buscar sozinho ao abrir o app</label>
+      <label style="margin:0;font-size:.8rem;color:var(--muted)">no máximo a cada
+        <select id="autoSyncH" onchange="autoSyncSetH()" style="width:auto;display:inline-block">
+          <option value="1">1 h</option><option value="6">6 h</option><option value="12">12 h</option><option value="24">24 h</option>
+        </select></label>
+    </div>
+    <p class="muted" id="autoSyncLast" style="font-size:.75rem;margin:4px 0 0"></p>
     <p class="muted" style="font-size:.75rem">Isso conecta com o Worker do Cloudflare que você publicou — ele busca os dados no Meu Pluggy. Nenhuma credencial bancária passa por aqui, só o endereço do Worker e o token combinado entre os dois. Depois de configurar, use o botão "Atualizar do banco" na aba Lançamentos. Configure uma vez: essa conexão é sincronizada entre seus aparelhos (vai junto na nuvem), então o celular pega sozinho.</p>
     <div class="actions"><button class="btn ghost">Fechar</button></div>
   </form>
@@ -974,6 +985,8 @@ function migrate(d){
   if(!d.recurringMatch) d.recurringMatch = {};
   // qual conta do app corresponde a cada conta do banco: {pluggyAccountId: appAccountId}
   if(!d.settings.bankAccMap) d.settings.bankAccMap = {};
+  // sincronização automática ao abrir o app (h = intervalo mínimo entre buscas, em horas)
+  if(!d.settings.autoSync) d.settings.autoSync = {on:true, h:6};
   if(!d.assetsFixed) d.assetsFixed = [];
   if(!d.debts) d.debts = [];
   if(!d.nwHistory) d.nwHistory = {};
@@ -3577,6 +3590,7 @@ function renderBankUI(){
   bankConnected.style.display = connected ? 'flex' : 'none';
   bankStatus.textContent = connected ? '✓ Conectado ao Worker' : 'Nenhuma conexão bancária configurada ainda.';
   if(connected){ bankWorkerUrl.value=''; bankToken.value=''; }
+  renderAutoSyncUI();
 }
 let pluggyConnectLoading = null;
 function ensurePluggyConnect(){
@@ -3642,6 +3656,90 @@ async function syncBankData(){
     if(btn){ btn.disabled = false; btn.innerHTML = orig; }
   }
 }
+// ===== sincronização automática ao abrir o app =====
+// Roda sozinha no boot, com intervalo mínimo pra não gastar chamada à toa. Nunca importa nada
+// sozinha: atualiza os saldos vindos do banco e deixa os lançamentos novos esperando revisão,
+// que é o mesmo fluxo do botão "Atualizar do banco". Falha em silêncio — abrir o app não pode
+// depender do banco estar no ar.
+let pendingBankRows = [];
+
+function autoSyncCfg(){
+  if(!db.settings.autoSync) db.settings.autoSync = {on:true, h:6};
+  return db.settings.autoSync;
+}
+// já passou tempo suficiente desde a última busca?
+function autoSyncDue(){
+  const cfg = autoSyncCfg();
+  if(!cfg.on) return false;
+  if(!bankCfg().url || !bankCfg().token) return false;
+  const last = db.settings.lastBankSync;
+  if(!last) return true;
+  const horas = (Date.now() - new Date(last).getTime())/3600000;
+  return !(horas >= 0 && horas < (cfg.h||6));   // data futura/inválida também libera
+}
+async function maybeAutoSync(){
+  if(!autoSyncDue()) return;
+  try{
+    const r = await fetch(bankCfg().url+'/sync', {headers:{Authorization:'Bearer '+bankCfg().token}});
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+    lastBankAccounts = j.accounts || [];
+    db.settings.lastBankSync = new Date().toISOString();
+    // só o que ainda não entrou: o pluggyId é estável entre sincronizações
+    pendingBankRows = (j.transactions||[]).filter(t=>!(t.pluggyId && (db.importedBankTxIds||[]).includes(t.pluggyId)));
+    persist();
+    renderBankNotice();
+  }catch(e){
+    // sem internet, Worker fora do ar, token trocado: nada de alarme, tenta de novo depois
+    console.warn('sincronização automática falhou:', e.message);
+  }
+}
+// aviso discreto: quantos lançamentos esperam e qual o saldo no banco agora
+function renderBankNotice(){
+  const el = document.getElementById('bankNotice');
+  if(!el) return;
+  if(!pendingBankRows.length && !lastBankAccounts.length){ el.style.display='none'; return; }
+  const saldoBanco = lastBankAccounts.reduce((s,a)=>s+(a.saldo||0),0);
+  const noApp = db.accounts.filter(a=>a.type!=='cartao').reduce((s,a)=>s+accBalance(a),0);
+  const difere = Math.abs(saldoBanco - noApp) > 0.01;
+  const partes = [];
+  if(pendingBankRows.length)
+    partes.push('<b>'+pendingBankRows.length+' lançamento(s) novo(s) no banco.</b>');
+  if(lastBankAccounts.length){
+    partes.push('Saldo no banco: <b>'+fmt(saldoBanco)+'</b>'
+      + (difere ? ' — no app está '+fmt(noApp)+'.' : ' — bate com o app.'));
+  }
+  el.innerHTML = partes.join(' ')
+    + (pendingBankRows.length ? '<button class="btn" onclick="revisarPendentes()">Revisar</button>' : '')
+    + '<button class="btn" onclick="document.getElementById(\'bankNotice\').style.display=\'none\'">Dispensar</button>';
+  el.style.display = 'flex';
+}
+function revisarPendentes(){
+  if(!pendingBankRows.length) return;
+  openImportDialog('tx');
+  startReview(pendingBankRows);
+  document.getElementById('bankNotice').style.display='none';
+}
+function autoSyncToggle(){
+  autoSyncCfg().on = document.getElementById('autoSyncChk').checked;
+  save();
+}
+function autoSyncSetH(){
+  autoSyncCfg().h = parseInt(document.getElementById('autoSyncH').value) || 6;
+  save();
+}
+function renderAutoSyncUI(){
+  const chk = document.getElementById('autoSyncChk');
+  if(!chk) return;
+  const cfg = autoSyncCfg();
+  chk.checked = !!cfg.on;
+  document.getElementById('autoSyncH').value = String(cfg.h||6);
+  const last = db.settings.lastBankSync;
+  document.getElementById('autoSyncLast').textContent = last
+    ? 'Última busca: ' + fmtDate(last.slice(0,10)) + ' às ' + new Date(last).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})
+    : 'Nunca buscou automaticamente ainda.';
+}
+
 function openBankReconcile(){
   if(!lastBankAccounts.length){
     alert('Sincronize com o banco primeiro (Atualizar do banco) pra ter um saldo real pra comparar.');
@@ -4590,7 +4688,7 @@ renderAll();
 goTab('dash');
 renderDataAlert();
 initFS();
-initCloud();
+initCloud().then(maybeAutoSync);   // a config do banco pode vir da nuvem: sincroniza depois dela
 renderBankUI();
 
 // Service worker: só pra o app abrir sem internet (os dados já são locais).
