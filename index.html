@@ -2256,13 +2256,37 @@ function delRec(id){
   save();
 }
 function isPaid(recId, ym){ return (db.recurringPaid[ym]||[]).includes(recId); }
-// marcação manual: cria o lançamento real (aí sim entra no saldo) e já o vincula à conta fixa
+// marcação manual: só anota "essa eu já paguei" no controle das fixas. NÃO cria lançamento e
+// NÃO mexe no saldo — quem mexe no saldo é o lançamento real, vindo do extrato ou lançado à mão.
 function payRec(id){
   const r = db.recurring.find(r=>r.id===id); if(!r) return;
-  const tx = { id:uid(), recId:r.id, type:r.type||'despesa', amount:r.amount, desc:r.name, cat:r.cat, acc:r.acc, toAcc:null, date:dueDateISO(viewYM, r.day), stream:r.stream||null };
-  db.transactions.push(tx);
+  if(isPaid(id, viewYM)) return;
   (db.recurringPaid[viewYM] = db.recurringPaid[viewYM]||[]).push(id);
-  (db.recurringMatch[viewYM] = db.recurringMatch[viewYM]||{})[id] = tx.id;
+  save();
+}
+// lançamentos que a versão antiga do app criava sozinha a partir das contas fixas: eles ainda
+// entram no saldo e na lista, que é justamente o que as fixas não deveriam fazer
+function legacyRecTx(){ return db.transactions.filter(t=>t.recId); }
+function limparLancFixas(){
+  const alvos = legacyRecTx();
+  if(!alvos.length) return;
+  const total = alvos.reduce((s,t)=>s+(t.type==='receita'?t.amount:-t.amount), 0);
+  const msg = alvos.length+' lançamento(s) foram criados automaticamente pelas contas fixas e ainda mexem no seu saldo.'
+    + '\n\nApagar todos? O saldo vai variar em '+fmt(-total)+'.'
+    + '\n\nAs contas fixas continuam cadastradas — só deixam de virar lançamento.';
+  if(!confirm(msg)) return;
+  const ids = new Set(alvos.map(t=>t.id));
+  db.transactions = db.transactions.filter(t=>!ids.has(t.id));
+  // as baixas que apontavam pra esses lançamentos ficariam apontando pro vazio
+  for(const ym in db.recurringMatch){
+    for(const rid in db.recurringMatch[ym]){
+      if(ids.has(db.recurringMatch[ym][rid])){
+        delete db.recurringMatch[ym][rid];
+        db.recurringPaid[ym] = (db.recurringPaid[ym]||[]).filter(x=>x!==rid);
+      }
+    }
+  }
+  reconcileRecurring();   // pode haver um pagamento de verdade no extrato pra assumir a baixa
   save();
 }
 function recStatus(r, ym){
@@ -4648,6 +4672,9 @@ function renderRec(){
     + `<div class="trow"><div style="flex:1"><b>Receitas fixas</b></div><span class="amt pos">+ ${fmt(totR)}</span></div>`
     + `<div class="trow"><div style="flex:1"><b>Despesas fixas</b></div><span class="amt neg">− ${fmt(totD)}</span></div>`
     + `<div class="trow"><div style="flex:1"><b>Sobra fixa do mês</b></div><span class="amt ${totR-totD>=0?'pos':'neg'}">${fmt(totR-totD)}</span></div>`
+    + (()=>{ const lg = legacyRecTx(); return lg.length
+      ? `<div class="trow" style="border:0"><div class="t2" style="flex:1;color:var(--red)"><b>${lg.length} lançamento(s)</b> criados automaticamente por contas fixas ainda estão no seu saldo e na lista de lançamentos.</div><button class="btn danger" onclick="limparLancFixas()">Apagar e deixar só como previsão</button></div>`
+      : ''; })()
     + `<div class="trow" style="border:0"><div class="t2" style="flex:1">Contas fixas são <b>previsão</b>: não mexem no seu saldo. Quando o pagamento aparece no extrato (ou você importa/lança), o app reconhece sozinho e marca aqui.${pend.desp||pend.rec?` Ainda em aberto neste mês: <b>${fmt(pend.desp)}</b> a pagar${pend.rec?` e <b>${fmt(pend.rec)}</b> a receber`:''}.`:' Tudo deste mês já foi conciliado.'}</div></div>`
     : '<div class="empty">Cadastre salário, aluguel, luz, streaming... Elas ficam como previsão e o app marca como paga quando reconhecer o pagamento no seu extrato.</div>';
 }
